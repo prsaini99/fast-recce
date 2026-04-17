@@ -72,6 +72,7 @@ _RESIDENTIAL_TYPES: frozenset[str] = frozenset({
 _SOURCE_LABELS: dict[str, str] = {
     "airbnb": "Airbnb",
     "magicbricks": "MagicBricks",
+    "99acres": "99acres",
 }
 
 # External sources whose public pages don't expose phone/email/website.
@@ -79,7 +80,7 @@ _SOURCE_LABELS: dict[str, str] = {
 # prefixes regardless of what's stored in the DB (avoids showing stale
 # cruft from older scraping eras).
 _SOURCES_WITHOUT_PUBLIC_CONTACTS: frozenset[str] = frozenset({
-    "airbnb", "magicbricks",
+    "airbnb", "magicbricks", "99acres",
 })
 
 
@@ -96,9 +97,11 @@ class SearchService:
         briefing_service: BriefingService,
         airbnb_scraper: "ExternalListingSource | None" = None,
         magicbricks_scraper: "ExternalListingSource | None" = None,
+        acres99_scraper: "ExternalListingSource | None" = None,
         duckduckgo_client: "DuckDuckGoClient | None" = None,
         airbnb_max_listings_per_search: int = 10,
         magicbricks_max_listings_per_search: int = 5,
+        acres99_max_listings_per_search: int = 5,
     ) -> None:
         self.db = db
         self.discovery_service = discovery_service
@@ -110,9 +113,11 @@ class SearchService:
         self.briefing_service = briefing_service
         self.airbnb_scraper = airbnb_scraper
         self.magicbricks_scraper = magicbricks_scraper
+        self.acres99_scraper = acres99_scraper
         self.ddg_client = duckduckgo_client
         self.airbnb_max_listings = airbnb_max_listings_per_search
         self.magicbricks_max_listings = magicbricks_max_listings_per_search
+        self.acres99_max_listings = acres99_max_listings_per_search
 
     async def search(self, request: SearchRequest) -> SearchResponse:
         start = time.monotonic()
@@ -138,6 +143,7 @@ class SearchService:
         candidates_filtered_non_shoot = 0
         airbnb_listings_scraped = 0
         magicbricks_listings_scraped = 0
+        acres99_listings_scraped = 0
         fresh_ids: list[Any] = []  # IDs of properties just persisted in this request
 
         # 1. Dispatch to the right sources in parallel.
@@ -171,6 +177,15 @@ class SearchService:
                         max_listings=self.magicbricks_max_listings,
                     )
                 )
+            if self.acres99_scraper is not None:
+                tasks.append(
+                    self._run_external_source_path(
+                        request, location_hint,
+                        source=self.acres99_scraper,
+                        url_finder=self.ddg_client.find_99acres_listing_urls,
+                        max_listings=self.acres99_max_listings,
+                    )
+                )
 
         if not tasks:
             # Unreachable via `_classify_route` in practice. Defensive.
@@ -195,6 +210,8 @@ class SearchService:
                 airbnb_listings_scraped += scraped
             elif src == "magicbricks":
                 magicbricks_listings_scraped += scraped
+            elif src == "99acres":
+                acres99_listings_scraped += scraped
             errors.extend(outcome["errors"])
             fresh_ids.extend(outcome.get("ingested_ids") or [])
 
@@ -207,12 +224,15 @@ class SearchService:
                 "to enable them."
             )
         elif any_external_needed and (
-            self.airbnb_scraper is None and self.magicbricks_scraper is None
+            self.airbnb_scraper is None
+            and self.magicbricks_scraper is None
+            and self.acres99_scraper is None
         ):
             errors.append(
-                "No external-listing scrapers are enabled. Flip "
-                "AIRBNB_SCRAPE_ENABLED or MAGICBRICKS_SCRAPE_ENABLED in .env "
-                "to broaden residential / generic results."
+                "No external-listing scrapers are enabled. Flip one of "
+                "AIRBNB_SCRAPE_ENABLED / MAGICBRICKS_SCRAPE_ENABLED / "
+                "ACRES99_SCRAPE_ENABLED in .env to broaden residential / "
+                "generic results."
             )
 
         # 2. Load ranked results. Two sources merged:
@@ -274,6 +294,7 @@ class SearchService:
             candidates_filtered_non_shoot=candidates_filtered_non_shoot,
             airbnb_listings_scraped=airbnb_listings_scraped,
             magicbricks_listings_scraped=magicbricks_listings_scraped,
+            acres99_listings_scraped=acres99_listings_scraped,
             duration_seconds=round(time.monotonic() - start, 3),
             errors=errors,
         )

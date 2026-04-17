@@ -114,6 +114,36 @@ function EmptyState({ errors }: { errors: string[] }) {
   );
 }
 
+// Source label for a result card. Google-Places rows have `source_label=null`;
+// we surface them under "Google" so the toggle row stays consistent.
+const GOOGLE_LABEL = "Google";
+
+function sourceOf(r: SearchResultItem): string {
+  return r.source_label ?? GOOGLE_LABEL;
+}
+
+// localStorage key — shared across searches so the user's preference persists.
+const FILTER_STORAGE_KEY = "fastrecce.search.hiddenSources";
+
+function loadHiddenSources(): Set<string> {
+  try {
+    const raw = localStorage.getItem(FILTER_STORAGE_KEY);
+    if (!raw) return new Set();
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? new Set(parsed as string[]) : new Set();
+  } catch {
+    return new Set();
+  }
+}
+
+function saveHiddenSources(hidden: Set<string>): void {
+  try {
+    localStorage.setItem(FILTER_STORAGE_KEY, JSON.stringify([...hidden]));
+  } catch {
+    // quota / disabled storage — silent, the filter still works in-memory.
+  }
+}
+
 function ResultsList({
   results,
   inferredCity,
@@ -125,11 +155,37 @@ function ResultsList({
   duration: number;
   errors: string[];
 }) {
+  const [hiddenSources, setHiddenSources] = useState<Set<string>>(() =>
+    loadHiddenSources(),
+  );
+
+  // Counts per source in the current result batch — used to (a) label
+  // the pills with "(n)" and (b) auto-hide pills for sources that
+  // produced zero cards (so commercial searches don't show dead toggles).
+  const sourceCounts = new Map<string, number>();
+  for (const r of results) {
+    const key = sourceOf(r);
+    sourceCounts.set(key, (sourceCounts.get(key) ?? 0) + 1);
+  }
+  const availableSources = [...sourceCounts.keys()].sort();
+
+  const toggleSource = (source: string) => {
+    setHiddenSources((prev) => {
+      const next = new Set(prev);
+      if (next.has(source)) next.delete(source);
+      else next.add(source);
+      saveHiddenSources(next);
+      return next;
+    });
+  };
+
+  const visibleResults = results.filter((r) => !hiddenSources.has(sourceOf(r)));
+
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between text-xs text-muted-foreground">
         <span>
-          {results.length} result(s)
+          {visibleResults.length} of {results.length} result(s)
           {inferredCity ? <> in <strong>{inferredCity}</strong></> : null}
           · scraped in {duration.toFixed(1)}s
         </span>
@@ -147,11 +203,61 @@ function ResultsList({
         ) : null}
       </div>
 
+      {availableSources.length > 1 ? (
+        <SourceFilterBar
+          sources={availableSources}
+          counts={sourceCounts}
+          hidden={hiddenSources}
+          onToggle={toggleSource}
+        />
+      ) : null}
+
       <ul className="space-y-3">
-        {results.map((r) => (
+        {visibleResults.map((r) => (
           <ResultCard key={r.id} result={r} />
         ))}
       </ul>
+    </div>
+  );
+}
+
+function SourceFilterBar({
+  sources,
+  counts,
+  hidden,
+  onToggle,
+}: {
+  sources: string[];
+  counts: Map<string, number>;
+  hidden: Set<string>;
+  onToggle: (source: string) => void;
+}) {
+  return (
+    <div className="flex flex-wrap items-center gap-2 text-xs">
+      <span className="text-muted-foreground">Sources:</span>
+      {sources.map((s) => {
+        const isHidden = hidden.has(s);
+        const count = counts.get(s) ?? 0;
+        return (
+          <button
+            key={s}
+            type="button"
+            onClick={() => onToggle(s)}
+            aria-pressed={!isHidden}
+            className={
+              "inline-flex items-center gap-1 rounded-full border px-3 py-1 transition-colors " +
+              (isHidden
+                ? "border-border bg-background text-muted-foreground hover:bg-muted"
+                : "border-primary/50 bg-primary/10 text-foreground hover:bg-primary/15")
+            }
+          >
+            <span className="h-2 w-2 rounded-full"
+              style={{ backgroundColor: isHidden ? "transparent" : "currentColor" }}
+            />
+            {s} ({count})
+          </button>
+        );
+      })}
     </div>
   );
 }

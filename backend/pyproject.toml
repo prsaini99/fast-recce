@@ -33,6 +33,7 @@ dependencies = [
     "lxml>=5.3.0",
     "playwright>=1.49.0",
     "ddgs>=9.0.0",  # successor to duckduckgo-search (renamed 2025)
+    "curl_cffi>=0.7.0",  # TLS-fingerprint mimicry — used by 99acres scraper to bypass Akamai
 
     # Redis & queueing
     "redis>=5.2.0",

@@ -7,6 +7,7 @@ them. Used by the source router's residential / generic paths.
 Supported sources (one helper each):
   - Airbnb           → find_airbnb_listing_urls
   - MagicBricks      → find_magicbricks_listing_urls
+  - 99acres          → find_99acres_listing_urls
 
 (Part 3 removed the chained `find_property_website` step — these listings
 are surfaced as discovery-only with a "View on {source} ↗" CTA. Users
@@ -51,6 +52,14 @@ _AIRBNB_LISTING_URL_RE = re.compile(
 _MAGICBRICKS_LISTING_URL_RE = re.compile(
     r"^https?://(?:www\.)?magicbricks\.com/(?:mbldp/)?propertyDetails/"
     r".+?[?&]id=(?P<id>[0-9a-fA-F]{8,})",
+    re.IGNORECASE,
+)
+
+# 99acres listing URLs look like:
+#   https://www.99acres.com/<long-slug>-spid-<letter><digits>
+# The `spid-<letter><digits>` suffix is the stable listing ID.
+_ACRES99_LISTING_URL_RE = re.compile(
+    r"^https?://(?:www\.)?99acres\.com/.+?-spid-(?P<id>[A-Z][0-9]{6,})",
     re.IGNORECASE,
 )
 
@@ -128,6 +137,37 @@ class DuckDuckGoClient:
             seen_listing_ids.add(listing_id)
             # Keep the original URL (the slug helps SEO / readability when
             # the user clicks through). The ID is enough for dedup.
+            urls.append(r.href)
+            if len(urls) >= limit:
+                break
+        return urls
+
+    async def find_99acres_listing_urls(
+        self,
+        query: str,
+        *,
+        limit: int = 10,
+    ) -> list[str]:
+        """Return up to `limit` deduplicated 99acres listing URLs.
+
+        Uses `site:99acres.com inurl:spid` — 99acres' individual-listing
+        URLs all contain `spid-<id>`. Without this filter, DDG returns
+        mostly `/villas-in-<city>-ffid` category pages which have no
+        extractable per-listing data.
+        """
+        full_query = f"site:99acres.com inurl:spid {query}"
+        results = await self._search(full_query, max_results=limit * 3)
+
+        urls: list[str] = []
+        seen_listing_ids: set[str] = set()
+        for r in results:
+            match = _ACRES99_LISTING_URL_RE.match(r.href)
+            if match is None:
+                continue
+            listing_id = match.group("id").upper()
+            if listing_id in seen_listing_ids:
+                continue
+            seen_listing_ids.add(listing_id)
             urls.append(r.href)
             if len(urls) >= limit:
                 break

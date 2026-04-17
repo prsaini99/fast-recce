@@ -115,11 +115,14 @@ class FakeDDG:
         self,
         airbnb_urls: list[str] | None = None,
         magicbricks_urls: list[str] | None = None,
+        acres99_urls: list[str] | None = None,
     ) -> None:
         self.airbnb_urls = airbnb_urls or []
         self.magicbricks_urls = magicbricks_urls or []
+        self.acres99_urls = acres99_urls or []
         self.find_airbnb_calls: list[str] = []
         self.find_magicbricks_calls: list[str] = []
+        self.find_99acres_calls: list[str] = []
 
     async def find_airbnb_listing_urls(
         self, query: str, *, limit: int = 10
@@ -132,6 +135,12 @@ class FakeDDG:
     ) -> list[str]:
         self.find_magicbricks_calls.append(query)
         return self.magicbricks_urls[:limit]
+
+    async def find_99acres_listing_urls(
+        self, query: str, *, limit: int = 10
+    ) -> list[str]:
+        self.find_99acres_calls.append(query)
+        return self.acres99_urls[:limit]
 
 
 class FakeAirbnbScraper:
@@ -171,6 +180,30 @@ class FakeMagicBricksScraper:
         self.exited = 0
 
     async def __aenter__(self) -> "FakeMagicBricksScraper":
+        self.entered += 1
+        return self
+
+    async def __aexit__(self, *_exc: Any) -> None:
+        self.exited += 1
+
+    async def scrape_listing(self, url: str) -> Any:
+        self.scrape_calls.append(url)
+        return self.listings_by_url.get(url)
+
+
+class FakeAcres99Scraper:
+    """Minimal 99acres stand-in mirroring FakeMagicBricksScraper shape."""
+    source_id = "99acres"
+    source_label = "99acres"
+    exposes_contacts = False
+
+    def __init__(self, listings_by_url: dict[str, Any]) -> None:
+        self.listings_by_url = listings_by_url
+        self.scrape_calls: list[str] = []
+        self.entered = 0
+        self.exited = 0
+
+    async def __aenter__(self) -> "FakeAcres99Scraper":
         self.entered += 1
         return self
 
@@ -260,12 +293,25 @@ def _mb_listing(listing_id: str, title: str, city_hint: str = "Alibaug") -> Any:
     )
 
 
+def _acres99_listing(listing_id: str, title: str, city_hint: str = "Alibaug") -> Any:
+    from app.integrations.acres99_scraper import Acres99Listing
+    return Acres99Listing(
+        listing_id=listing_id,
+        url=f"https://www.99acres.com/x-spid-{listing_id}",
+        title=title,
+        description="Nice 99acres villa",
+        city_hint=city_hint,
+        locality="Alibaug",
+    )
+
+
 def _make_service(
     db: AsyncSession,
     google: FakeGoogleClient,
     *,
     airbnb_scraper: FakeAirbnbScraper | None = None,
     magicbricks_scraper: FakeMagicBricksScraper | None = None,
+    acres99_scraper: FakeAcres99Scraper | None = None,
     ddg: FakeDDG | None = None,
 ) -> SearchService:
     property_service = PropertyService(db=db)
@@ -298,9 +344,11 @@ def _make_service(
         ),
         airbnb_scraper=airbnb_scraper,  # type: ignore[arg-type]
         magicbricks_scraper=magicbricks_scraper,  # type: ignore[arg-type]
+        acres99_scraper=acres99_scraper,  # type: ignore[arg-type]
         duckduckgo_client=ddg,  # type: ignore[arg-type]
         airbnb_max_listings_per_search=5,
         magicbricks_max_listings_per_search=5,
+        acres99_max_listings_per_search=5,
     )
 
 
@@ -317,10 +365,11 @@ async def test_router_commercial_skips_airbnb(db_session: AsyncSession) -> None:
     ddg = FakeDDG(airbnb_urls=["https://www.airbnb.com/rooms/42"])
     scraper = FakeAirbnbScraper(listings_by_url={})
     mb = FakeMagicBricksScraper(listings_by_url={})
+    acres = FakeAcres99Scraper(listings_by_url={})
 
     service = _make_service(
         db_session, google, airbnb_scraper=scraper,
-        magicbricks_scraper=mb, ddg=ddg,
+        magicbricks_scraper=mb, acres99_scraper=acres, ddg=ddg,
     )
     resp = await service.search(SearchRequest(query="resorts in Alibaug"))
 
@@ -329,16 +378,19 @@ async def test_router_commercial_skips_airbnb(db_session: AsyncSession) -> None:
     # No external source was triggered for a commercial query.
     assert ddg.find_airbnb_calls == []
     assert ddg.find_magicbricks_calls == []
+    assert ddg.find_99acres_calls == []
     assert scraper.scrape_calls == []
     assert mb.scrape_calls == []
+    assert acres.scrape_calls == []
     assert scraper.entered == 0
     assert mb.entered == 0
+    assert acres.entered == 0
 
 
 async def test_router_residential_fires_all_sources_in_parallel(
     db_session: AsyncSession,
 ) -> None:
-    """'villa in Alibaug' → Google + Airbnb + MagicBricks all fire."""
+    """'villa in Alibaug' → Google + Airbnb + MagicBricks + 99acres all fire."""
     await _seed_google_source(db_session)
     google = FakeGoogleClient(
         search_responses={"villa in Alibaug": [_place_search("p_g", "Google Villa")]},
@@ -346,17 +398,25 @@ async def test_router_residential_fires_all_sources_in_parallel(
     )
     airbnb_url = "https://www.airbnb.com/rooms/42"
     mb_url = "https://www.magicbricks.com/propertyDetails/x&id=abc"
-    ddg = FakeDDG(airbnb_urls=[airbnb_url], magicbricks_urls=[mb_url])
+    acres99_url = "https://www.99acres.com/x-spid-K42"
+    ddg = FakeDDG(
+        airbnb_urls=[airbnb_url],
+        magicbricks_urls=[mb_url],
+        acres99_urls=[acres99_url],
+    )
     scraper = FakeAirbnbScraper(
         listings_by_url={airbnb_url: _airbnb_listing("42", "Airbnb Villa")},
     )
     mb = FakeMagicBricksScraper(
         listings_by_url={mb_url: _mb_listing("abc", "MB Villa")},
     )
+    acres = FakeAcres99Scraper(
+        listings_by_url={acres99_url: _acres99_listing("K42", "99acres Villa")},
+    )
 
     service = _make_service(
         db_session, google,
-        airbnb_scraper=scraper, magicbricks_scraper=mb, ddg=ddg,
+        airbnb_scraper=scraper, magicbricks_scraper=mb, acres99_scraper=acres, ddg=ddg,
     )
     resp = await service.search(SearchRequest(query="villa in Alibaug"))
 
@@ -364,29 +424,40 @@ async def test_router_residential_fires_all_sources_in_parallel(
     assert google.text_search_calls == ["villa in Alibaug"]
     assert ddg.find_airbnb_calls == ["villa in Alibaug"]
     assert ddg.find_magicbricks_calls == ["villa in Alibaug"]
+    assert ddg.find_99acres_calls == ["villa in Alibaug"]
     assert scraper.scrape_calls == [airbnb_url]
     assert mb.scrape_calls == [mb_url]
+    assert acres.scrape_calls == [acres99_url]
     assert resp.airbnb_listings_scraped == 1
     assert resp.magicbricks_listings_scraped == 1
+    assert resp.acres99_listings_scraped == 1
 
 
 async def test_router_generic_skips_google_fires_external(db_session: AsyncSession) -> None:
-    """'property in Karjat' → no type match → Airbnb + MB only, Google skipped."""
+    """'property in Karjat' → no type match → all 3 external sources, Google skipped."""
     await _seed_google_source(db_session)
     google = FakeGoogleClient()  # should never be called
     airbnb_url = "https://www.airbnb.com/rooms/99"
     mb_url = "https://www.magicbricks.com/propertyDetails/x&id=def"
-    ddg = FakeDDG(airbnb_urls=[airbnb_url], magicbricks_urls=[mb_url])
+    acres99_url = "https://www.99acres.com/x-spid-W99"
+    ddg = FakeDDG(
+        airbnb_urls=[airbnb_url],
+        magicbricks_urls=[mb_url],
+        acres99_urls=[acres99_url],
+    )
     scraper = FakeAirbnbScraper(
         listings_by_url={airbnb_url: _airbnb_listing("99", "Karjat Home", "Karjat")},
     )
     mb = FakeMagicBricksScraper(
         listings_by_url={mb_url: _mb_listing("def", "MB Karjat Home", "Karjat")},
     )
+    acres = FakeAcres99Scraper(
+        listings_by_url={acres99_url: _acres99_listing("W99", "99A Karjat Home", "Karjat")},
+    )
 
     service = _make_service(
         db_session, google,
-        airbnb_scraper=scraper, magicbricks_scraper=mb, ddg=ddg,
+        airbnb_scraper=scraper, magicbricks_scraper=mb, acres99_scraper=acres, ddg=ddg,
     )
     resp = await service.search(SearchRequest(query="property in Karjat"))
 
@@ -394,8 +465,37 @@ async def test_router_generic_skips_google_fires_external(db_session: AsyncSessi
     assert google.text_search_calls == []
     assert ddg.find_airbnb_calls == ["property in Karjat"]
     assert ddg.find_magicbricks_calls == ["property in Karjat"]
+    assert ddg.find_99acres_calls == ["property in Karjat"]
     assert scraper.scrape_calls == [airbnb_url]
     assert mb.scrape_calls == [mb_url]
+    assert acres.scrape_calls == [acres99_url]
+
+
+async def test_acres99_runs_when_others_disabled(db_session: AsyncSession) -> None:
+    """If only 99acres is enabled, residential/generic still dispatches it."""
+    await _seed_google_source(db_session)
+    google = FakeGoogleClient(
+        search_responses={"villa in Alibaug": [_place_search("p_g", "Google Villa")]},
+        details_by_id={"p_g": _place_details("p_g", "Google Villa")},
+    )
+    acres99_url = "https://www.99acres.com/x-spid-X1"
+    ddg = FakeDDG(acres99_urls=[acres99_url])
+    acres = FakeAcres99Scraper(
+        listings_by_url={acres99_url: _acres99_listing("X1", "Solo 99A Villa")},
+    )
+
+    service = _make_service(
+        db_session, google,
+        airbnb_scraper=None, magicbricks_scraper=None, acres99_scraper=acres, ddg=ddg,
+    )
+    resp = await service.search(SearchRequest(query="villa in Alibaug"))
+
+    assert resp.acres99_listings_scraped == 1
+    assert resp.airbnb_listings_scraped == 0
+    assert resp.magicbricks_listings_scraped == 0
+    assert acres.scrape_calls == [acres99_url]
+    assert ddg.find_airbnb_calls == []
+    assert ddg.find_magicbricks_calls == []
 
 
 async def test_magicbricks_runs_when_airbnb_disabled(db_session: AsyncSession) -> None:

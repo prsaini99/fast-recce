@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import Settings, get_settings
 from app.database import get_db
 from app.exceptions import ForbiddenError, UnauthorizedError
+from app.integrations.acres99_scraper import Acres99Scraper
 from app.integrations.airbnb_scraper import AirbnbScraper
 from app.integrations.duckduckgo import DuckDuckGoClient
 from app.integrations.external_listing_source import ExternalListingSource
@@ -98,6 +99,7 @@ async def get_search_service(
     # degrade gracefully (warning in `errors`) when all are disabled.
     airbnb_scraper: ExternalListingSource | None = None
     magicbricks_scraper: ExternalListingSource | None = None
+    acres99_scraper: ExternalListingSource | None = None
     duckduckgo_client: DuckDuckGoClient | None = None
 
     if settings.airbnb_scrape_enabled:
@@ -108,7 +110,15 @@ async def get_search_service(
         magicbricks_scraper = MagicBricksScraper(
             request_delay_seconds=settings.magicbricks_request_delay_seconds,
         )
-    if airbnb_scraper is not None or magicbricks_scraper is not None:
+    if settings.acres99_scrape_enabled:
+        acres99_scraper = Acres99Scraper(
+            request_delay_seconds=settings.acres99_request_delay_seconds,
+        )
+    if (
+        airbnb_scraper is not None
+        or magicbricks_scraper is not None
+        or acres99_scraper is not None
+    ):
         duckduckgo_client = DuckDuckGoClient()
     try:
         async with google_client:
@@ -145,9 +155,11 @@ async def get_search_service(
                 briefing_service=briefing_service,
                 airbnb_scraper=airbnb_scraper,
                 magicbricks_scraper=magicbricks_scraper,
+                acres99_scraper=acres99_scraper,
                 duckduckgo_client=duckduckgo_client,
                 airbnb_max_listings_per_search=settings.airbnb_max_listings_per_search,
                 magicbricks_max_listings_per_search=settings.magicbricks_max_listings_per_search,
+                acres99_max_listings_per_search=settings.acres99_max_listings_per_search,
             )
     finally:
         await llm_client.close()

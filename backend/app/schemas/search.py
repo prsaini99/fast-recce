@@ -79,5 +79,6 @@ class SearchResponse(BaseModel):
     candidates_filtered_non_shoot: int = 0
     airbnb_listings_scraped: int = 0
     magicbricks_listings_scraped: int = 0
+    acres99_listings_scraped: int = 0
     duration_seconds: float
     errors: list[str] = Field(default_factory=list)

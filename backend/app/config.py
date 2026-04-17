@@ -77,6 +77,14 @@ class Settings(BaseSettings):
     # request is a real HTTP round-trip.
     magicbricks_max_listings_per_search: int = 5
 
+    # --- 99acres scraping (Part 4 follow-up) ---
+    # Master kill switch. Default OFF. Uses `curl_cffi` to bypass Akamai's
+    # TLS-fingerprint block (plain httpx gets 403 immediately).
+    acres99_scrape_enabled: bool = False
+    acres99_request_delay_seconds: float = 5.0
+    # Keep small — Akamai tolerance is unknown at scale.
+    acres99_max_listings_per_search: int = 5
+
     # --- Pipeline ---
     default_cities: list[str] = [
         "Mumbai",

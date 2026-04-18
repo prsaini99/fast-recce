@@ -58,7 +58,8 @@
       "Bash(./.venv/Scripts/python.exe -m pytest tests/unit/test_airbnb_scraper.py -q)",
       "Bash(./.venv/Scripts/python.exe -m pip install curl_cffi)",
       "Bash(curl -s -X POST http://127.0.0.1:8000/api/v1/search -H \"Content-Type: application/json\" -d \"{\\\\\"query\\\\\":\\\\\"villa in alibaug\\\\\",\\\\\"max_results\\\\\":5}\" --max-time 240)",
-      "Bash(curl -s -X POST http://127.0.0.1:8000/api/v1/search -H \"Content-Type: application/json\" -d \"{\\\\\"query\\\\\":\\\\\"house in Karjat\\\\\",\\\\\"max_results\\\\\":10}\" --max-time 180)"
+      "Bash(curl -s -X POST http://127.0.0.1:8000/api/v1/search -H \"Content-Type: application/json\" -d \"{\\\\\"query\\\\\":\\\\\"house in Karjat\\\\\",\\\\\"max_results\\\\\":10}\" --max-time 180)",
+      "Bash(./.venv/Scripts/python.exe -m alembic upgrade head)"
     ]
   },
   "hooks": {

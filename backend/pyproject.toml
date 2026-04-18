@@ -35,17 +35,11 @@ dependencies = [
     "ddgs>=9.0.0",  # successor to duckduckgo-search (renamed 2025)
     "curl_cffi>=0.7.0",  # TLS-fingerprint mimicry — used by 99acres scraper to bypass Akamai
 
-    # Redis & queueing
-    "redis>=5.2.0",
-
     # Scheduling
     "prefect>=3.1.0",
 
     # LLM (Google Gemini via the unified google-genai SDK)
     "google-genai>=0.3.0",
-
-    # Storage
-    "boto3>=1.35.0",
 
     # Image processing
     "Pillow>=11.0.0",

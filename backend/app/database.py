@@ -9,12 +9,20 @@ from app.config import get_settings
 
 settings = get_settings()
 
+# asyncpg + pgbouncer (transaction mode, used by Supabase's pooler) are
+# incompatible with asyncpg's prepared-statement cache — pgbouncer
+# multiplexes connections per-transaction, so the prepared statement
+# from one transaction may end up on a different backend the next time.
+# Setting `statement_cache_size=0` disables the cache and keeps every
+# query as a simple-protocol query, which pgbouncer handles fine.
+# Harmless for non-pooled local Postgres too.
 engine = create_async_engine(
     str(settings.database_url),
     echo=settings.database_echo,
     pool_size=settings.database_pool_size,
     max_overflow=settings.database_max_overflow,
     pool_pre_ping=True,
+    connect_args={"statement_cache_size": 0},
 )
 
 SessionLocal = async_sessionmaker(

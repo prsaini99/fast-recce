@@ -25,8 +25,6 @@ pytestmark = pytest.mark.asyncio
 def _settings() -> Settings:
     return Settings(  # type: ignore[call-arg]
         database_url="postgresql+asyncpg://u:p@localhost/x",
-        s3_access_key="x",
-        s3_secret_key="x",
         jwt_secret_key="super-secret-key-for-tests-only",
         google_places_api_key="x",
         gemini_api_key="x",

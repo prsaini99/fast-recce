@@ -22,21 +22,16 @@ class Settings(BaseSettings):
     debug: bool = False
     log_level: str = "INFO"
 
+    # CORS — comma-separated origins. Default keeps local dev working;
+    # in production, set CORS_ORIGINS to the Vercel URL (and any others).
+    # Example: CORS_ORIGINS=https://fastrecce.vercel.app,http://localhost:5173
+    cors_origins: str = "http://localhost:5173"
+
     # --- Database ---
     database_url: PostgresDsn
     database_echo: bool = False
     database_pool_size: int = 10
     database_max_overflow: int = 20
-
-    # --- Redis ---
-    redis_url: str = "redis://localhost:6379/0"
-
-    # --- S3 / MinIO ---
-    s3_endpoint_url: str | None = None
-    s3_access_key: str
-    s3_secret_key: str
-    s3_bucket: str = "fastrecce-snapshots"
-    s3_region: str = "us-east-1"
 
     # --- Auth ---
     jwt_secret_key: str

@@ -12,7 +12,10 @@ export const ACCESS_TOKEN_KEY = "fastrecce.access_token";
 export const REFRESH_TOKEN_KEY = "fastrecce.refresh_token";
 export const USER_KEY = "fastrecce.user";
 
-const BASE_URL = import.meta.env.VITE_API_URL ?? "/api/v1";
+// `||` (not `??`) so an empty-string env var also falls back. Empty
+// strings in .env files are common and would otherwise produce a broken
+// baseURL ("") that resolves all requests against the SPA's own origin.
+const BASE_URL = import.meta.env.VITE_API_URL || "/api/v1";
 
 export const http: AxiosInstance = axios.create({
   baseURL: BASE_URL,

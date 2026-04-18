@@ -1,12 +1,19 @@
 """MagicBricks scraper — best-effort extraction from public listing pages.
 
-Design mirrors AirbnbScraper:
-  - Zero cost: plain async HTTP, no proxies / CAPTCHA solvers.
+Uses `curl_cffi` (TLS-fingerprint mimicry) instead of plain httpx because
+MagicBricks' Akamai edge serves instant 403s to data-center IPs (Render,
+AWS, GCP) when the TLS handshake doesn't look like a real Chrome browser.
+Same trick as the 99acres scraper. Locally on a residential IP plain
+httpx works too, but `curl_cffi` is consistent across both environments.
+
+Design otherwise mirrors AirbnbScraper:
+  - Zero cost: no proxies / CAPTCHA solvers / paid services.
   - Zero runtime cost: ~1 second per listing, no Chromium.
   - Stability: prefers the embedded schema.org `RealEstateListing` JSON-LD
     blob (SEO-driven, rarely changes) with `<title>` / `<h1>` fallbacks.
-  - Graceful failure: `scrape_listing` returns None on 403/410/CAPTCHA /
-    parse miss — never raises.
+  - Graceful failure: `scrape_listing` returns None on 410 / parse miss;
+    raises ScraperBlockedError on 403/429/CAPTCHA so the source router's
+    early-abort guard kicks in.
 
 Fields we extract (best-effort):
   listing_id, title, description, locality, city_hint, amenities,
@@ -28,8 +35,8 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
-import httpx
 from bs4 import BeautifulSoup
+from curl_cffi.requests import AsyncSession
 
 from app.integrations.external_listing import ExternalListing
 from app.integrations.external_listing_source import ScraperBlockedError
@@ -82,9 +89,12 @@ class MagicBricksListing(ExternalListing):
 
 
 class MagicBricksScraper:
-    """Plain-HTTP MagicBricks scraper.
+    """`curl_cffi`-based MagicBricks scraper.
 
-    Issues an async `httpx` GET, pulls the `RealEstateListing` JSON-LD
+    Issues an async GET via `curl_cffi.AsyncSession(impersonate="chrome131")`
+    so Akamai's TLS-fingerprint bot check (which 403s plain httpx from data
+    center IPs like Render's) sees a real-Chrome handshake. Then pulls the
+    `RealEstateListing` JSON-LD
     blob out of the HTML (schema.org; stable across UI redesigns), with
     `<title>` / `<h1>` as fallbacks.
 
@@ -102,34 +112,41 @@ class MagicBricksScraper:
         request_delay_seconds: float = 5.0,
         jitter_seconds: float = 2.0,
         request_timeout_seconds: float = 15.0,
+        impersonate: str = "chrome131",
     ) -> None:
         self.request_delay_seconds = request_delay_seconds
         self.jitter_seconds = jitter_seconds
         self.request_timeout_seconds = request_timeout_seconds
+        self.impersonate = impersonate
 
-        self._client: httpx.AsyncClient | None = None
+        self._session: AsyncSession | None = None
         self._last_request_at: float = 0.0
 
     async def __aenter__(self) -> "MagicBricksScraper":
-        self._client = httpx.AsyncClient(
+        # `curl_cffi` impersonates a real Chrome TLS handshake (JA3 + HTTP/2
+        # frame ordering). Akamai's bot edge — which is far stricter for data
+        # center IPs (Render's Singapore servers were getting instant 403s
+        # with plain httpx) — is gated on TLS fingerprint and waves through
+        # the real-Chrome handshake. Same trick we use for 99acres.
+        self._session = AsyncSession(
             headers=_BROWSER_HEADERS,
             timeout=self.request_timeout_seconds,
-            follow_redirects=True,
-            http2=False,
+            impersonate=self.impersonate,  # type: ignore[arg-type]
         )
         return self
 
     async def __aexit__(self, *_exc: object) -> None:
-        if self._client is not None:
-            await self._client.aclose()
-            self._client = None
+        if self._session is not None:
+            await self._session.close()
+            self._session = None
 
     async def scrape_listing(self, url: str) -> ExternalListing | None:
         """Fetch one MagicBricks listing URL and extract structured fields.
 
-        Returns None on 403/410 / CAPTCHA HTML / unparseable response.
+        Returns None on 410 (delisted) / parse miss; raises ScraperBlockedError
+        on 403/429/5xx/CAPTCHA so the source router's early-abort kicks in.
         """
-        if self._client is None:
+        if self._session is None:
             raise RuntimeError("MagicBricksScraper must be used as an async context manager")
 
         listing_id_match = _LISTING_ID_RE.search(url)
@@ -141,8 +158,8 @@ class MagicBricksScraper:
         await self._throttle()
 
         try:
-            resp = await self._client.get(url)
-        except httpx.HTTPError as exc:
+            resp = await self._session.get(url, allow_redirects=True)
+        except Exception as exc:  # noqa: BLE001 — curl_cffi raises its own hierarchy
             logger.warning("MagicBricks GET failed for %s: %s", url, exc)
             return None
 

@@ -4,25 +4,6 @@
  * from the FastAPI OpenAPI spec.
  */
 
-export type UserRole = "admin" | "reviewer" | "sales" | "viewer";
-
-export interface User {
-  id: string;
-  email: string;
-  full_name: string;
-  role: UserRole;
-  is_active: boolean;
-  created_at: string;
-}
-
-export interface LoginResponse {
-  access_token: string;
-  refresh_token: string;
-  token_type: "bearer";
-  expires_in: number;
-  user: User;
-}
-
 export type PropertyStatus =
   | "new"
   | "reviewed"
@@ -64,6 +45,9 @@ export interface PropertyListItem {
   canonical_email: string | null;
   canonical_website: string | null;
   google_rating: number | null;
+
+  source_query_id: string | null;
+  source_query_text: string | null;
 }
 
 export interface Contact {
@@ -95,7 +79,6 @@ export interface PropertyOutreach {
   id: string;
   status: OutreachStatus;
   priority: number;
-  assigned_to: string | null;
   outreach_channel: OutreachChannel | null;
   contact_attempts: number;
   notes: string | null;
@@ -181,7 +164,6 @@ export interface OutreachItem {
     canonical_phone: string | null;
     canonical_email: string | null;
   };
-  assigned_to: { id: string; full_name: string } | null;
 }
 
 export interface OutreachStats {
@@ -230,6 +212,10 @@ export interface SearchRequest {
   city?: string;
   property_type?: PropertyType;
   max_results?: number;
+  use_airbnb?: boolean | null;
+  use_magicbricks?: boolean | null;
+  use_acres99?: boolean | null;
+  refresh?: boolean;
 }
 
 export interface SearchSubScore {
@@ -262,6 +248,9 @@ export interface SearchResultItem {
   primary_image_url: string | null;
   external_url: string | null;
   source_label: string | null;
+
+  source_query_id: string | null;
+  source_query_text: string | null;
 }
 
 export interface SearchResponse {
@@ -274,4 +263,35 @@ export interface SearchResponse {
   candidates_skipped_known: number;
   duration_seconds: number;
   errors: string[];
+}
+
+export type SearchJobStatus = "running" | "completed" | "failed";
+
+export interface SearchJob {
+  id: string;
+  query_text: string;
+  status: SearchJobStatus;
+  error: string | null;
+  started_at: string;
+  finished_at: string | null;
+}
+
+export interface SearchJobDetail extends SearchJob {
+  response: SearchResponse | null;
+}
+
+export interface SearchHistoryItem {
+  id: string;
+  query_text: string;
+  inferred_city: string | null;
+  inferred_property_type: string | null;
+  result_count: number;
+  search_count: number;
+  last_searched_at: string;
+}
+
+export interface SearchHistorySuggestion {
+  query_text: string;
+  result_count: number;
+  last_searched_at: string;
 }

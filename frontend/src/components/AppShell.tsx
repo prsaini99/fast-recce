@@ -1,75 +1,105 @@
-import { NavLink, Outlet } from "react-router-dom";
+import { useEffect, useState } from "react";
+import { Link, NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
+import { useQueryClient } from "@tanstack/react-query";
 import type { ReactNode } from "react";
 
-import { useAuth } from "@/context/AuthContext";
+import { SearchHistorySidebar } from "@/components/SearchHistorySidebar";
+import { SearchInput } from "@/components/SearchInput";
+import {
+  loadSearchPrefs,
+  saveSearchPrefs,
+  type SearchPrefs,
+} from "@/components/SearchOptions";
 import { cn } from "@/lib/utils";
 
 interface NavItem {
   label: string;
   to: string;
-  icon: string;
-  adminOnly?: boolean;
 }
 
 const NAV: NavItem[] = [
-  { label: "Lead Queue", to: "/admin/leads", icon: "📋" },
-  { label: "Outreach", to: "/admin/outreach", icon: "📞" },
-  { label: "Analytics", to: "/admin/analytics", icon: "📊" },
+  { label: "Search", to: "/search" },
+  { label: "Leads", to: "/leads" },
+  { label: "Analytics", to: "/analytics" },
 ];
 
 export function AppShell() {
-  const { user, logout } = useAuth();
+  const navigate = useNavigate();
+  const location = useLocation();
+  const queryClient = useQueryClient();
+  const initialQuery = new URLSearchParams(location.search).get("q") ?? "";
+  const [query, setQuery] = useState(initialQuery);
+  const [prefs, setPrefs] = useState<SearchPrefs>(() => loadSearchPrefs());
+
+  const onSearchPage = location.pathname.startsWith("/search");
+  const showCompactSearch = location.pathname.startsWith("/search/results");
+
+  function handlePrefsChange(next: SearchPrefs) {
+    setPrefs(next);
+    saveSearchPrefs(next);
+  }
+
+  useEffect(() => {
+    // Keep the top-bar input synced with the URL when navigating between
+    // past searches from the sidebar.
+    setQuery(new URLSearchParams(location.search).get("q") ?? "");
+  }, [location.search]);
+
+  function submitSearch(v: string) {
+    const params = new URLSearchParams();
+    params.set("q", v);
+    navigate(`/search/results?${params.toString()}`);
+    // Sidebar may have a new entry after a live search; refresh it.
+    queryClient.invalidateQueries({ queryKey: ["search-history"] });
+  }
 
   return (
-    <div className="flex h-full min-h-screen bg-background text-foreground">
-      <aside className="flex w-64 flex-col border-r border-border bg-muted/30">
-        <div className="p-6">
-          <h1 className="text-lg font-semibold">FastRecce</h1>
-          <p className="text-xs text-muted-foreground">Location acquisition OS</p>
+    <div className="min-h-screen bg-background text-foreground">
+      <header className="border-b border-border bg-background">
+        <div className="mx-auto flex max-w-7xl items-center gap-4 px-6 py-3">
+          <Link to="/search" className="shrink-0 text-lg font-semibold">
+            FastRecce
+          </Link>
+
+          <nav className="flex items-center gap-1">
+            {NAV.map((item) => (
+              <NavLink
+                key={item.to}
+                to={item.to}
+                className={({ isActive }) =>
+                  cn(
+                    "rounded-md px-3 py-1.5 text-sm transition-colors",
+                    isActive
+                      ? "bg-primary text-primary-foreground"
+                      : "text-muted-foreground hover:bg-muted hover:text-foreground"
+                  )
+                }
+              >
+                {item.label}
+              </NavLink>
+            ))}
+          </nav>
+
+          {showCompactSearch ? (
+            <SearchInput
+              value={query}
+              onChange={setQuery}
+              onSubmit={submitSearch}
+              prefs={prefs}
+              onPrefsChange={handlePrefsChange}
+            />
+          ) : (
+            <div className="flex-1" />
+          )}
         </div>
+      </header>
 
-        <nav className="flex-1 space-y-1 px-3">
-          {NAV.map((item) => (
-            <NavLink
-              key={item.to}
-              to={item.to}
-              className={({ isActive }) =>
-                cn(
-                  "flex items-center gap-3 rounded-md px-3 py-2 text-sm transition-colors",
-                  isActive
-                    ? "bg-primary text-primary-foreground"
-                    : "text-foreground hover:bg-muted"
-                )
-              }
-            >
-              <span aria-hidden>{item.icon}</span>
-              <span>{item.label}</span>
-            </NavLink>
-          ))}
-        </nav>
-
-        <div className="border-t border-border p-4 text-sm">
-          <div className="mb-1 truncate font-medium">{user?.full_name}</div>
-          <div className="mb-3 text-xs text-muted-foreground">
-            {user?.email}
-            <br />
-            role: <span className="font-mono">{user?.role}</span>
-          </div>
-          <button
-            type="button"
-            onClick={logout}
-            className="w-full rounded-md border border-border px-3 py-1.5 text-xs font-medium hover:bg-muted"
-          >
-            Log out
-          </button>
-        </div>
-      </aside>
-
-      <main className="flex-1 overflow-y-auto">
-        <div className="mx-auto max-w-7xl p-8">
+      <div className="mx-auto flex max-w-7xl">
+        {onSearchPage ? <SearchHistorySidebar /> : null}
+        <main className="min-w-0 flex-1 px-6 py-8">
           <Outlet />
-        </div>
-      </main>
+        </main>
+      </div>
     </div>
   );
 }

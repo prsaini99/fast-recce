@@ -1,4 +1,4 @@
-import { Link, useParams } from "react-router-dom";
+import { Link, useNavigate, useParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 
 import { extractErrorMessage } from "@/api/client";
@@ -13,12 +13,26 @@ import {
 
 export function PublicPropertyDetailPage() {
   const { id } = useParams<{ id: string }>();
+  const navigate = useNavigate();
 
   const { data, isLoading, isError, error } = useQuery({
     queryKey: ["public-property", id],
     queryFn: () => searchApi.getProperty(id!),
     enabled: Boolean(id),
   });
+
+  // In an SPA, `document.referrer` is only set on the very first page
+  // load, not on internal route changes, so checking it blocked the "back
+  // to results" path for anyone who navigated within the app. Use
+  // `window.history.length` — it's >1 whenever there's a previous entry
+  // in the session history, which is exactly when `navigate(-1)` works.
+  function handleBack() {
+    if (window.history.length > 1) {
+      navigate(-1);
+    } else {
+      navigate("/search");
+    }
+  }
 
   if (isLoading) {
     return (
@@ -43,11 +57,18 @@ export function PublicPropertyDetailPage() {
   return (
     <div className="mx-auto max-w-5xl px-6 py-8">
       <div className="mb-4 flex items-center gap-4">
+        <button
+          type="button"
+          onClick={handleBack}
+          className="text-xs text-muted-foreground hover:underline"
+        >
+          ← Back to results
+        </button>
         <Link
           to="/search"
           className="text-xs text-muted-foreground hover:underline"
         >
-          ← New search
+          New search
         </Link>
       </div>
 
@@ -59,7 +80,7 @@ export function PublicPropertyDetailPage() {
           </span>
           {data.google_rating ? (
             <span className="text-xs text-muted-foreground">
-              Google: ⭐ {data.google_rating}
+              ⭐ {data.google_rating}
               {data.google_review_count
                 ? ` (${data.google_review_count} reviews)`
                 : ""}
@@ -73,6 +94,18 @@ export function PublicPropertyDetailPage() {
           {data.state ? `, ${data.state}` : ""}
         </p>
       </header>
+
+      {/* Hero image — external sources (Airbnb/MB/99acres) populate this
+          via scraper; Google Places rows populate it from the Photos API. */}
+      {typeof data.features_json?.primary_image_url === "string" &&
+      data.features_json.primary_image_url ? (
+        <img
+          src={data.features_json.primary_image_url as string}
+          alt={data.canonical_name}
+          loading="lazy"
+          className="mb-6 h-64 w-full rounded-md object-cover"
+        />
+      ) : null}
 
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
         <div className="space-y-6 lg:col-span-2">
@@ -102,6 +135,11 @@ export function PublicPropertyDetailPage() {
             placeId={data.google_place_id}
             lat={data.lat}
             lng={data.lng}
+            externalUrl={
+              (data.features_json?.external_url as string | undefined) ??
+              (data.features_json?.airbnb_url as string | undefined) ??
+              null
+            }
           />
           <div className="rounded-md border border-border bg-muted/30 p-5 text-xs text-muted-foreground">
             Contact details are scraped from publicly-listed business profiles.

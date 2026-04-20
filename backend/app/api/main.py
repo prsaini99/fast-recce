@@ -108,7 +108,6 @@ def _register_routers(app: FastAPI) -> None:
     """Mount API routers under /api/v1. Routes added as modules are built."""
     from app.api import (
         analytics,
-        auth,
         outreach,
         properties,
         queries,
@@ -120,7 +119,6 @@ def _register_routers(app: FastAPI) -> None:
     async def health() -> dict[str, str]:
         return {"status": "ok"}
 
-    app.include_router(auth.router)
     app.include_router(sources.router)
     app.include_router(queries.router)
     app.include_router(properties.router)

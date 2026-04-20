@@ -73,13 +73,6 @@ DNC_CONTACT_TYPES: Final[tuple[str, ...]] = (
     "domain",            # block an entire website domain
 )
 
-USER_ROLES: Final[tuple[str, ...]] = (
-    "admin",    # full access
-    "reviewer", # review + outreach
-    "sales",    # outreach on assigned items
-    "viewer",   # read-only
-)
-
 OUTREACH_STATUSES: Final[tuple[str, ...]] = (
     "pending",
     "contacted",

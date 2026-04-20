@@ -1,7 +1,6 @@
 import { http } from "./client";
 import type {
   AnalyticsDashboard,
-  LoginResponse,
   OutreachItem,
   OutreachStats,
   Paginated,
@@ -9,16 +8,13 @@ import type {
   PropertyListItem,
   ReviewRequest,
   ReviewResponse,
+  SearchHistoryItem,
+  SearchHistorySuggestion,
+  SearchJob,
+  SearchJobDetail,
+  SearchJobStatus,
   SearchRequest,
-  SearchResponse,
-  User,
 } from "./types";
-
-export const authApi = {
-  login: (email: string, password: string) =>
-    http.post<LoginResponse>("/auth/login", { email, password }).then((r) => r.data),
-  me: () => http.get<User>("/auth/me").then((r) => r.data),
-};
 
 export interface PropertyListParams {
   city?: string;
@@ -46,11 +42,16 @@ export const propertiesApi = {
     http
       .patch<ReviewResponse>(`/properties/${id}/review`, body)
       .then((r) => r.data),
+  score: (id: string) =>
+    http.post<PropertyDetail>(`/properties/${id}/score`).then((r) => r.data),
+  brief: (id: string) =>
+    http.post<PropertyDetail>(`/properties/${id}/brief`).then((r) => r.data),
+  enrich: (id: string) =>
+    http.post<PropertyDetail>(`/properties/${id}/enrich`).then((r) => r.data),
 };
 
 export interface OutreachListParams {
   status?: string;
-  assigned_to?: string;
   city?: string;
   min_priority?: number;
   sort?: string;
@@ -77,11 +78,30 @@ export const analyticsApi = {
 };
 
 export const searchApi = {
-  search: (body: SearchRequest) =>
-    http.post<SearchResponse>("/search", body).then((r) => r.data),
-  // Public, unauthenticated detail read — mirrors `propertiesApi.get` shape
-  // but routes through `/api/v1/search/property/<id>` so visitors don't get
-  // a 401 on the admin properties endpoint.
+  /**
+   * Kick off (or coalesce to) a search job. Always returns a job record;
+   * callers poll `getJob(id)` until `status` flips to completed/failed.
+   */
+  start: (body: SearchRequest) =>
+    http.post<SearchJob>("/search", body).then((r) => r.data),
+  getJob: (id: string) =>
+    http.get<SearchJobDetail>(`/search/jobs/${id}`).then((r) => r.data),
+  listJobs: (status?: SearchJobStatus, limit = 50) =>
+    http
+      .get<SearchJob[]>("/search/jobs", { params: { status, limit } })
+      .then((r) => r.data),
+  cancelJob: (id: string) =>
+    http.delete<SearchJob>(`/search/jobs/${id}`).then((r) => r.data),
   getProperty: (id: string) =>
     http.get<PropertyDetail>(`/search/property/${id}`).then((r) => r.data),
+  history: (limit = 50) =>
+    http
+      .get<SearchHistoryItem[]>("/search/history", { params: { limit } })
+      .then((r) => r.data),
+  suggest: (q: string, limit = 8) =>
+    http
+      .get<SearchHistorySuggestion[]>("/search/history/suggest", {
+        params: { q, limit },
+      })
+      .then((r) => r.data),
 };

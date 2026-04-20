@@ -75,6 +75,11 @@ class PropertyListItem(BaseModel):
     canonical_website: str | None
     google_rating: float | None
 
+    # Backlink to the user search that first surfaced this property so the
+    # Lead Queue can render a "discovered via '<query>'" pill.
+    source_query_id: UUID | None = None
+    source_query_text: str | None = None
+
 
 class PropertyDetail(PropertyRead):
     """Lead queue detail view — includes nested contacts and outreach."""

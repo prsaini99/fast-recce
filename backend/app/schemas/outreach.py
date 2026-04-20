@@ -15,13 +15,6 @@ OutreachStatus = Literal[
 OutreachChannel = Literal["phone", "email", "whatsapp", "form", "in_person"]
 
 
-class OutreachUserRef(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
-
-    id: UUID
-    full_name: str
-
-
 class OutreachPropertyRef(BaseModel):
     """Compact property projection embedded in outreach list responses."""
 
@@ -53,7 +46,6 @@ class OutreachRead(BaseModel):
     updated_at: datetime
 
     property: OutreachPropertyRef
-    assigned_to: OutreachUserRef | None
 
 
 class OutreachUpdate(BaseModel):
@@ -62,7 +54,6 @@ class OutreachUpdate(BaseModel):
     status: OutreachStatus | None = None
     priority: int | None = Field(default=None, ge=1, le=100)
     outreach_channel: OutreachChannel | None = None
-    assigned_to: UUID | None = None
     follow_up_at: datetime | None = None
     notes: str | None = None
 

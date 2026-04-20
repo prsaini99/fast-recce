@@ -41,6 +41,7 @@ from app.services.dedup_service import DedupService
 from app.services.discovery_service import DiscoveryService
 from app.services.property_service import PropertyService
 from app.services.scoring_service import ScoringService
+from app.services.search_history_service import SearchHistoryService, normalize_query
 
 from app.integrations.external_listing_source import ScraperBlockedError
 
@@ -102,6 +103,9 @@ class SearchService:
         airbnb_max_listings_per_search: int = 10,
         magicbricks_max_listings_per_search: int = 5,
         acres99_max_listings_per_search: int = 5,
+        airbnb_default_enabled: bool = False,
+        magicbricks_default_enabled: bool = False,
+        acres99_default_enabled: bool = False,
     ) -> None:
         self.db = db
         self.discovery_service = discovery_service
@@ -118,10 +122,71 @@ class SearchService:
         self.airbnb_max_listings = airbnb_max_listings_per_search
         self.magicbricks_max_listings = magicbricks_max_listings_per_search
         self.acres99_max_listings = acres99_max_listings_per_search
+        # Env-level defaults. `SearchRequest.use_*` can override per call.
+        self.airbnb_default = airbnb_default_enabled
+        self.magicbricks_default = magicbricks_default_enabled
+        self.acres99_default = acres99_default_enabled
+        self.history_service = SearchHistoryService(db=db)
+
+    @staticmethod
+    def _resolved(override: bool | None, default: bool) -> bool:
+        """Honor per-request override, falling back to the env default."""
+        return default if override is None else override
 
     async def search(self, request: SearchRequest) -> SearchResponse:
+        try:
+            return await self._search_impl(request)
+        except Exception:
+            # A single failed statement (e.g. Supabase pooler timeout) leaves
+            # the AsyncSession in a rolled-back state, and every subsequent
+            # query then raises PendingRollbackError. Explicitly clearing
+            # the transaction here keeps the session usable for retries and
+            # for `get_db`'s rollback handler to operate cleanly.
+            try:
+                await self.db.rollback()
+            except Exception:  # noqa: BLE001
+                pass
+            raise
+
+    async def _search_impl(self, request: SearchRequest) -> SearchResponse:
         start = time.monotonic()
         errors: list[str] = []
+
+        # Cache hit: replay previously scraped results for this query.
+        # We treat any past run as a cache hit (no TTL for now) — identical
+        # text queries reuse the same scraped property set. The user can
+        # always trigger a fresh scrape by tweaking their query text.
+        normalized = normalize_query(request.query)
+        cached = await self.history_service.get_by_normalized(normalized)
+        if cached is not None and cached.result_property_ids:
+            cached_ids = [uuid.UUID(pid) for pid in cached.result_property_ids]
+            cached_rows = await self.property_service.list_by_ids(cached_ids)
+            if cached_rows:
+                # Bump counters (last_searched_at + search_count).
+                await self.history_service.record(
+                    query_text=request.query,
+                    normalized_query=normalized,
+                    inferred_city=cached.inferred_city,
+                    inferred_property_type=cached.inferred_property_type,
+                    result_property_ids=cached_ids,
+                    duration_seconds=cached.duration_seconds,
+                )
+                await self.db.commit()
+                return SearchResponse(
+                    query=request.query,
+                    inferred_city=cached.inferred_city,
+                    inferred_property_type=cached.inferred_property_type,
+                    results=[self._to_result_item(row) for row in cached_rows[: request.max_results]],
+                    candidates_discovered=0,
+                    candidates_new=0,
+                    candidates_skipped_known=len(cached_rows),
+                    candidates_filtered_non_shoot=0,
+                    airbnb_listings_scraped=0,
+                    magicbricks_listings_scraped=0,
+                    acres99_listings_scraped=0,
+                    duration_seconds=round(time.monotonic() - start, 3),
+                    errors=[],
+                )
 
         # Hints only — we no longer gate on city inference. Google's geocoder
         # handles "resorts in Bandra", "farmhouse Karjat", anywhere worldwide.
@@ -134,7 +199,7 @@ class SearchService:
         property_type_hint = request.property_type or _infer_property_type(request.query)
         location_hint = _extract_location_hint(request.query) or city_hint or ""
 
-        route = _classify_route(property_type_hint)
+        route = _classify_route(request.query, property_type_hint)
 
         # Zero-stats placeholders — filled in by whichever branches actually run.
         candidates_discovered = 0
@@ -155,11 +220,16 @@ class SearchService:
                 self._run_google_places_path(request, city_hint, property_type_hint)
             )
 
-        # External-listing sources (Airbnb, MagicBricks) fire for residential
-        # + generic routes. Each is gated on its own feature flag via a
-        # non-None scraper injection.
+        # External-listing sources (Airbnb, MagicBricks, 99acres) fire for
+        # residential + generic routes. Each source is gated by the
+        # per-request override if present, else the env default. Scraper
+        # instances are always constructed in `build_search_service`.
+        airbnb_on = self._resolved(request.use_airbnb, self.airbnb_default)
+        magicbricks_on = self._resolved(request.use_magicbricks, self.magicbricks_default)
+        acres99_on = self._resolved(request.use_acres99, self.acres99_default)
+
         if any_external_needed and self.ddg_client is not None:
-            if self.airbnb_scraper is not None:
+            if airbnb_on and self.airbnb_scraper is not None:
                 tasks.append(
                     self._run_external_source_path(
                         request, location_hint,
@@ -168,7 +238,7 @@ class SearchService:
                         max_listings=self.airbnb_max_listings,
                     )
                 )
-            if self.magicbricks_scraper is not None:
+            if magicbricks_on and self.magicbricks_scraper is not None:
                 tasks.append(
                     self._run_external_source_path(
                         request, location_hint,
@@ -177,7 +247,7 @@ class SearchService:
                         max_listings=self.magicbricks_max_listings,
                     )
                 )
-            if self.acres99_scraper is not None:
+            if acres99_on and self.acres99_scraper is not None:
                 tasks.append(
                     self._run_external_source_path(
                         request, location_hint,
@@ -215,24 +285,14 @@ class SearchService:
             errors.extend(outcome["errors"])
             fresh_ids.extend(outcome.get("ingested_ids") or [])
 
-        # Warn when the route wanted external sources but none were configured.
-        if any_external_needed and self.ddg_client is None:
+        # Warn when the route wanted external sources but the caller turned
+        # them all off for this query (via `use_airbnb=False` etc.).
+        if any_external_needed and not (airbnb_on or magicbricks_on or acres99_on):
             errors.append(
-                "External-listing scrapers are disabled. Residential / generic "
-                "queries only surface Google Places results. Set "
-                "AIRBNB_SCRAPE_ENABLED=true (and/or MAGICBRICKS_SCRAPE_ENABLED=true) "
-                "to enable them."
-            )
-        elif any_external_needed and (
-            self.airbnb_scraper is None
-            and self.magicbricks_scraper is None
-            and self.acres99_scraper is None
-        ):
-            errors.append(
-                "No external-listing scrapers are enabled. Flip one of "
-                "AIRBNB_SCRAPE_ENABLED / MAGICBRICKS_SCRAPE_ENABLED / "
-                "ACRES99_SCRAPE_ENABLED in .env to broaden residential / "
-                "generic results."
+                "All property scrapers are disabled for this search — "
+                "residential / generic queries will only surface Google "
+                "Places results. Toggle a scraper on in the search options "
+                "to broaden results."
             )
 
         # 2. Load ranked results. Two sources merged:
@@ -281,7 +341,42 @@ class SearchService:
             if len(merged) >= request.max_results:
                 break
 
-        results = [self._to_result_item(row) for row in merged]
+        # Annotate each result with its originating query when the property
+        # was first discovered by an older search. A property stays linked to
+        # the first query that surfaced it; later queries just point at the
+        # earlier one via source_query_id / source_query_text.
+        first_sources = await self.history_service.first_search_by_property(
+            [row.id for row in merged]
+        )
+
+        results: list[SearchResultItem] = []
+        for row in merged:
+            item = self._to_result_item(row)
+            source = first_sources.get(row.id)
+            if source is not None and source.normalized_query != normalized:
+                item.source_query_id = source.id
+                item.source_query_text = source.query_text
+            results.append(item)
+
+        duration = round(time.monotonic() - start, 3)
+
+        # Persist only the properties first discovered by THIS query; any
+        # property that was already linked to an earlier search stays linked
+        # there. This keeps the sidebar / cache-hit replay stable: clicking
+        # the older query still shows those properties under it, and the new
+        # query's own history row only "owns" what's genuinely new.
+        new_property_ids = [
+            row.id for row in merged if row.id not in first_sources
+        ]
+        await self.history_service.record(
+            query_text=request.query,
+            normalized_query=normalized,
+            inferred_city=city_hint,
+            inferred_property_type=property_type_hint,
+            result_property_ids=new_property_ids,
+            duration_seconds=duration,
+        )
+        await self.db.commit()
 
         return SearchResponse(
             query=request.query,
@@ -295,7 +390,7 @@ class SearchService:
             airbnb_listings_scraped=airbnb_listings_scraped,
             magicbricks_listings_scraped=magicbricks_listings_scraped,
             acres99_listings_scraped=acres99_listings_scraped,
-            duration_seconds=round(time.monotonic() - start, 3),
+            duration_seconds=duration,
             errors=errors,
         )
 
@@ -486,20 +581,26 @@ class SearchService:
                 "primary_image_url": listing.primary_image_url,
                 "image_urls": list(listing.image_urls or []),
                 "airbnb_host_first_name": host_first_name,
+                # New scraped specifics — every field is optional per
+                # source; None values are kept deliberately so the result
+                # card can detect "not extracted" vs "actually missing".
+                "price_display": listing.price_display,
+                "price_value": listing.price_value,
+                "price_currency": listing.price_currency,
+                "price_period": listing.price_period,
+                "bedrooms": listing.bedrooms,
+                "bathrooms": listing.bathrooms,
+                "area_sqft": listing.area_sqft,
+                "max_guests": listing.max_guests,
+                "property_subtype": listing.property_subtype,
             },
         )
         prop = await self.property_service.upsert_from_candidate(payload)
-
-        # Score + brief still run — both have heuristic fallbacks so even a
-        # thin external payload (title + city only) produces something useful.
-        try:
-            await self.scoring_service.score_property(prop.id)
-        except Exception:  # noqa: BLE001
-            pass
-        try:
-            await self.briefing_service.generate_brief(prop.id)
-        except Exception:  # noqa: BLE001
-            pass
+        # Score + brief are now on-demand via the "Enrich" button on the
+        # property card — keeping them out of the scrape pipeline makes
+        # the initial search ~60% faster and avoids Gemini rate-limit
+        # induced timeouts. Clients can call POST /properties/{id}/enrich
+        # (or /score, /brief individually) when ranked results matter.
         return prop.id
 
     # --- Internals ---
@@ -523,6 +624,24 @@ class SearchService:
                 "feature_tags": list(crawl_result.unstructured_data.feature_tags),
                 "description": crawl_result.unstructured_data.description,
             }
+
+        # Pull the first photo reference from the Google Places details
+        # payload and turn it into a renderable image URL. `photos[i].name`
+        # has the form `places/<place_id>/photos/<ref>` — Google serves
+        # the actual image at `/v1/{name}/media?key=...&maxHeightPx=...`.
+        # We append the API key so the frontend can <img src=...> directly;
+        # the key is restricted to the Places Photos endpoint in GCP so
+        # exposing it here is acceptable for dev. Production should route
+        # through a backend proxy.
+        photo_url = _google_photo_url_from_candidate(candidate)
+        if photo_url and not features.get("primary_image_url"):
+            features["primary_image_url"] = photo_url
+
+        # Lift rich Google-Places signals into features_json so the LLM
+        # prompt can reference them without digging through raw payloads.
+        google_context = _google_rich_context_from_candidate(candidate)
+        if google_context:
+            features.setdefault("google_context", google_context)
 
         # Upsert into the canonical property table.
         payload = PropertyUpsertFromCandidate(
@@ -548,17 +667,8 @@ class SearchService:
             prop.id, api_contacts, crawl_contacts
         )
 
-        # Score + brief so the user sees ranked, explained results.
-        try:
-            await self.scoring_service.score_property(prop.id)
-        except Exception as exc:  # noqa: BLE001
-            # Scoring fallback already built-in, but if something else blows
-            # up we still want to proceed (the user can see the row anyway).
-            raise exc
-        try:
-            await self.briefing_service.generate_brief(prop.id)
-        except Exception:  # noqa: BLE001 — brief failure should not block
-            pass
+        # Score + brief are no longer run inline — they're on-demand via
+        # the enrich endpoints so the scrape pipeline stays fast.
 
         # Mark the candidate as processed so an admin running the pipeline
         # later doesn't double-process it.
@@ -566,7 +676,8 @@ class SearchService:
         await self.db.flush()
         return prop.id
 
-    def _to_result_item(self, row: Any) -> SearchResultItem:
+    @staticmethod
+    def _to_result_item(row: Any) -> SearchResultItem:
         sub_scores: list[SearchSubScore] = []
         reason = getattr(row, "score_reason_json", None)
         if isinstance(reason, dict):
@@ -707,6 +818,82 @@ def _infer_city(query: str) -> str | None:
     return None
 
 
+def _google_rich_context_from_candidate(
+    candidate: DiscoveryCandidate,
+) -> dict[str, Any] | None:
+    """Extract Google-provided prose signals for the LLM enrichment prompt.
+
+    Google Places (New) gives us three useful text-ish signals that we
+    don't otherwise store: `editorialSummary` (Google's own blurb),
+    `reviews` (author-written review text), `priceLevel` ("MODERATE",
+    "EXPENSIVE", etc). Stashing them under `features_json.google_context`
+    lets the LLM scoring/briefing prompts pull them in uniformly with
+    the scraper-side description/amenities.
+    """
+    raw = candidate.raw_result_json or {}
+    if not isinstance(raw, dict):
+        return None
+    details = raw.get("details")
+    if not isinstance(details, dict):
+        return None
+
+    out: dict[str, Any] = {}
+
+    summary = details.get("editorialSummary")
+    if isinstance(summary, dict):
+        text = summary.get("text")
+        if isinstance(text, str) and text.strip():
+            out["editorial_summary"] = text.strip()[:1000]
+
+    price_level = details.get("priceLevel")
+    if isinstance(price_level, str) and price_level.strip():
+        out["price_level"] = price_level
+
+    reviews = details.get("reviews")
+    if isinstance(reviews, list):
+        snippets: list[str] = []
+        for rev in reviews[:5]:
+            if not isinstance(rev, dict):
+                continue
+            text_block = rev.get("text")
+            if isinstance(text_block, dict):
+                text_value = text_block.get("text")
+                if isinstance(text_value, str) and text_value.strip():
+                    snippets.append(text_value.strip()[:600])
+        if snippets:
+            out["review_snippets"] = snippets
+
+    return out or None
+
+
+def _google_photo_url_from_candidate(candidate: DiscoveryCandidate) -> str | None:
+    """Build a renderable image URL from a Google Places details payload.
+
+    Discovery stashes `details.raw` under `raw_result_json.details`. The
+    Places API (New) returns photos as `{"name": "places/<id>/photos/<ref>", ...}`.
+    We convert the first one into `/v1/{name}/media?maxHeightPx=400&key=...`,
+    which Google serves as a 302 redirect to the actual CDN URL.
+    """
+    raw = candidate.raw_result_json or {}
+    details = raw.get("details") if isinstance(raw, dict) else None
+    photos = (details or {}).get("photos") if isinstance(details, dict) else None
+    if not isinstance(photos, list) or not photos:
+        return None
+    first = photos[0] if isinstance(photos[0], dict) else None
+    if not first:
+        return None
+    name = first.get("name")
+    if not isinstance(name, str) or not name:
+        return None
+    from app.config import get_settings
+
+    api_key = get_settings().google_places_api_key
+    return (
+        f"https://places.googleapis.com/v1/{name}/media"
+        f"?maxHeightPx=400&key={api_key}"
+    )
+
+
 # Words to strip when deriving a location hint from the query text.
 # Includes generic placeholders ("property", "place", "home", etc.) — they
 # look like property types to a casual reader but they're really filler
@@ -781,19 +968,63 @@ def _allowed_types_for_route(route: str) -> list[str] | None:
     return None  # defensive — let everything through if route is unknown
 
 
-def _classify_route(property_type_hint: str | None) -> str:
+def _classify_route(query: str, property_type_hint: str | None) -> str:
     """Pick the source bucket for a query.
 
-    Commercial types (resort, cafe, hotel, ...) are well-indexed by Google.
-    Residential types (villa, bungalow, farmhouse, heritage_home) appear on
-    both Google and Airbnb. Anything else ('other' / generic 'property in X')
-    is only really findable on Airbnb.
+    Airbnb / MagicBricks / 99acres only list properties you can rent or buy.
+    Firing them on a non-property query ("best coffee shops in Bandra") is
+    both expensive and pollutes the result set with junk. So we only route
+    to them when the query is explicitly about a residence.
+
+    - commercial (Google Places only): recognized commercial type
+      (cafe, resort, hotel, warehouse, ...).
+    - residential (Google + external property scrapers): recognized
+      residential type (villa, bungalow, farmhouse, heritage_home).
+    - generic (external property scrapers only): type couldn't be
+      inferred BUT the raw query contains an explicit property-intent
+      keyword (`property`, `stay`, `home`, `rental`, `apartment`, ...).
+    - unknown → commercial (Google only): everything else. Prevents
+      "meetups in kandivali" or "coffee shops in mumbai" from silently
+      triggering the property scrapers.
     """
     if property_type_hint in _COMMERCIAL_TYPES:
         return "commercial"
     if property_type_hint in _RESIDENTIAL_TYPES:
         return "residential"
-    return "generic"
+    if _has_property_intent(query):
+        return "generic"
+    # Fall back to Google-only so we don't waste a scraper round on a
+    # query with no property signal at all.
+    return "commercial"
+
+
+# Free-text markers that signal the user is looking for somewhere to stay,
+# rent, or buy — the only queries for which Airbnb / MagicBricks / 99acres
+# can return useful rows. Matched as whole words (case-insensitive) against
+# the raw query when `_infer_property_type` didn't land on a known type.
+_PROPERTY_INTENT_KEYWORDS: frozenset[str] = frozenset({
+    "property", "properties",
+    "stay", "stays", "staycation",
+    "home", "homes", "house", "houses",
+    "flat", "flats", "apartment", "apartments",
+    "rental", "rentals", "rent",
+    "airbnb", "bnb",
+    "room", "rooms", "accommodation", "accommodations",
+    "pg", "hostel", "hostels",
+    "lodge", "lodging", "lodgings",
+    "cottage", "cottages",
+    "bungalow", "bungalows",
+    "villa", "villas",
+    "farmhouse", "farmhouses", "farmstay", "farmstays",
+    "resort", "resorts",
+    "homestay", "homestays",
+})
+
+
+def _has_property_intent(query: str) -> bool:
+    """True iff the raw query contains a word that means "I want a place"."""
+    tokens = set(re.findall(r"[a-z]+", query.lower()))
+    return bool(tokens & _PROPERTY_INTENT_KEYWORDS)
 
 
 def _zero_path_outcome(

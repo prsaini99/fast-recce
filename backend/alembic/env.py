@@ -19,11 +19,21 @@ from app.models import (  # noqa: F401,E402,A004
     outreach,
     property,
     query_bank,
+    search_history,
+    search_job,
     source,
-    user,
 )
 
-_MODELS_REGISTERED = (source, query_bank, discovery, property, contact, user, outreach)
+_MODELS_REGISTERED = (
+    source,
+    query_bank,
+    discovery,
+    property,
+    contact,
+    outreach,
+    search_history,
+    search_job,
+)
 
 config = context.config
 

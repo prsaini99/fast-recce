@@ -1,27 +1,47 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 
 import { extractErrorMessage } from "@/api/client";
 import { propertiesApi, type PropertyListParams } from "@/api/endpoints";
-import type { ReviewAction } from "@/api/types";
 import { PageHeader } from "@/components/AppShell";
 import { ScoreBadge, StatusBadge } from "@/components/ScoreBadge";
 import { cn } from "@/lib/utils";
 
 const PAGE_SIZE = 25;
 
-const CITIES = ["", "Mumbai", "Thane", "Navi Mumbai", "Lonavala", "Pune", "Alibaug", "Alibag", "Chaul", "Varasoli", "Nagaon", "Akshi"];
-const STATUSES = ["new", "approved", "rejected", "do_not_contact", "onboarded"];
-
+/**
+ * Leads = every property surfaced by at least one user search.
+ *
+ * Filters are intentionally minimal:
+ *   - free-text search across name / city / locality
+ *   - min relevance score
+ *   - sort order
+ *
+ * City and status filters were removed to keep the surface simple; the
+ * properties table stays synced to the search_history set via the backend
+ * `synced_only=true` default, so we never show ghost rows here.
+ */
 export function LeadQueuePage() {
+  const [search, setSearch] = useState<string>("");
   const [filters, setFilters] = useState<PropertyListParams>({
-    status: "new",
     sort: "relevance_score_desc",
     offset: 0,
     page_size: PAGE_SIZE,
   });
+
+  // Debounce the search input so we don't refetch on every keystroke.
+  useEffect(() => {
+    const id = setTimeout(() => {
+      setFilters((prev) => ({
+        ...prev,
+        search: search.trim() || undefined,
+        offset: 0,
+      }));
+    }, 250);
+    return () => clearTimeout(id);
+  }, [search]);
 
   const { data, isLoading, isError, error } = useQuery({
     queryKey: ["properties", filters],
@@ -30,17 +50,13 @@ export function LeadQueuePage() {
   });
 
   const queryClient = useQueryClient();
-  const reviewMutation = useMutation({
-    mutationFn: ({ id, action }: { id: string; action: ReviewAction }) =>
-      propertiesApi.review(id, { action }),
-    onSuccess: (res) => {
-      toast.success(`Marked as ${res.status}`);
+  const enrichMutation = useMutation({
+    mutationFn: (id: string) => propertiesApi.enrich(id),
+    onSuccess: () => {
+      toast.success("Enriched");
       queryClient.invalidateQueries({ queryKey: ["properties"] });
-      queryClient.invalidateQueries({ queryKey: ["analytics"] });
     },
-    onError: (err) => {
-      toast.error(extractErrorMessage(err));
-    },
+    onError: (err) => toast.error(extractErrorMessage(err)),
   });
 
   function updateFilter<K extends keyof PropertyListParams>(
@@ -53,34 +69,33 @@ export function LeadQueuePage() {
   return (
     <div>
       <PageHeader
-        title="Lead Queue"
+        title="Leads"
         subtitle={
           data
-            ? `${data.meta.total_count} properties matching current filters`
-            : "Scored and briefed properties awaiting review"
+            ? `${data.meta.total_count} properties across all searches`
+            : "All scraped properties linked to a search"
         }
       />
 
       <div className="mb-4 flex flex-wrap items-end gap-3 rounded-md border border-border bg-background p-4">
-        <FilterSelect
-          label="City"
-          value={filters.city ?? ""}
-          options={CITIES.map((c) => ({ value: c, label: c || "All cities" }))}
-          onChange={(v) => updateFilter("city", v || undefined)}
-        />
-        <FilterSelect
-          label="Status"
-          value={filters.status ?? "new"}
-          options={STATUSES.map((s) => ({ value: s, label: s.replace(/_/g, " ") }))}
-          onChange={(v) => updateFilter("status", v)}
-        />
+        <label className="flex flex-1 flex-col gap-1 text-xs">
+          <span className="text-muted-foreground">Search</span>
+          <input
+            type="text"
+            placeholder="Name, city, or locality…"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            className="rounded-md border border-border bg-background px-3 py-1.5 text-sm"
+          />
+        </label>
+
         <FilterNumber
           label="Min score"
           value={filters.min_score}
           step={0.05}
           onChange={(v) => updateFilter("min_score", v)}
         />
-        <div className="flex-1" />
+
         <FilterSelect
           label="Sort by"
           value={filters.sort ?? "relevance_score_desc"}
@@ -115,71 +130,77 @@ export function LeadQueuePage() {
               </tr>
             </thead>
             <tbody>
-              {data.data.map((prop) => (
-                <tr
-                  key={prop.id}
-                  className="border-t border-border transition-colors hover:bg-muted/30"
-                >
-                  <td className="px-4 py-3">
-                    <ScoreBadge score={prop.relevance_score} />
-                  </td>
-                  <td className="px-4 py-3">
-                    <Link
-                      to={`/admin/properties/${prop.id}`}
-                      className="font-medium hover:underline"
-                    >
-                      {prop.canonical_name}
-                    </Link>
-                    {prop.short_brief ? (
-                      <div className="mt-0.5 max-w-[48ch] truncate text-xs text-muted-foreground">
-                        {prop.short_brief}
-                      </div>
-                    ) : null}
-                  </td>
-                  <td className="px-4 py-3 text-muted-foreground">
-                    {prop.property_type.replace(/_/g, " ")}
-                  </td>
-                  <td className="px-4 py-3 text-muted-foreground">
-                    {prop.locality ?? prop.city}
-                  </td>
-                  <td className="px-4 py-3">
-                    <ContactIcons prop={prop} />
-                  </td>
-                  <td className="px-4 py-3">
-                    <StatusBadge status={prop.status} />
-                  </td>
-                  <td className="px-4 py-3 text-right">
-                    {prop.status === "new" ? (
-                      <div className="inline-flex gap-1">
-                        <SmallButton
-                          onClick={() =>
-                            reviewMutation.mutate({ id: prop.id, action: "approve" })
-                          }
-                          disabled={reviewMutation.isPending}
-                          tone="primary"
-                        >
-                          Approve
-                        </SmallButton>
-                        <SmallButton
-                          onClick={() =>
-                            reviewMutation.mutate({ id: prop.id, action: "reject" })
-                          }
-                          disabled={reviewMutation.isPending}
-                        >
-                          Reject
-                        </SmallButton>
-                      </div>
-                    ) : (
+              {data.data.map((prop) => {
+                const pending =
+                  enrichMutation.isPending && enrichMutation.variables === prop.id;
+                const needsEnrichment =
+                  prop.relevance_score == null || !prop.short_brief;
+                return (
+                  <tr
+                    key={prop.id}
+                    className="border-t border-border transition-colors hover:bg-muted/30"
+                  >
+                    <td className="px-4 py-3">
+                      <ScoreBadge score={prop.relevance_score} />
+                    </td>
+                    <td className="px-4 py-3">
                       <Link
-                        to={`/admin/properties/${prop.id}`}
-                        className="text-xs text-muted-foreground hover:underline"
+                        to={`/property/${prop.id}`}
+                        className="font-medium hover:underline"
                       >
-                        View
+                        {prop.canonical_name}
                       </Link>
-                    )}
-                  </td>
-                </tr>
-              ))}
+                      {prop.short_brief ? (
+                        <div className="mt-0.5 max-w-[48ch] truncate text-xs text-muted-foreground">
+                          {prop.short_brief}
+                        </div>
+                      ) : null}
+                      {prop.source_query_text ? (
+                        <div className="mt-1">
+                          <Link
+                            to={`/search/results?q=${encodeURIComponent(prop.source_query_text)}`}
+                            className="inline-block max-w-[48ch] truncate rounded-full border border-border bg-muted/30 px-2 py-0.5 text-[11px] text-muted-foreground hover:bg-muted"
+                            title="Open the query that surfaced this lead"
+                          >
+                            ← from "{prop.source_query_text}"
+                          </Link>
+                        </div>
+                      ) : null}
+                    </td>
+                    <td className="px-4 py-3 text-muted-foreground">
+                      {prop.property_type.replace(/_/g, " ")}
+                    </td>
+                    <td className="px-4 py-3 text-muted-foreground">
+                      {prop.locality ?? prop.city}
+                    </td>
+                    <td className="px-4 py-3">
+                      <ContactIcons prop={prop} />
+                    </td>
+                    <td className="px-4 py-3">
+                      <StatusBadge status={prop.status} />
+                    </td>
+                    <td className="px-4 py-3 text-right">
+                      <button
+                        type="button"
+                        onClick={() => enrichMutation.mutate(prop.id)}
+                        disabled={enrichMutation.isPending}
+                        className={cn(
+                          "rounded-md border px-2 py-1 text-xs font-medium transition-colors disabled:opacity-50",
+                          needsEnrichment
+                            ? "border-primary/50 bg-primary/10 hover:bg-primary/15"
+                            : "border-border hover:bg-muted",
+                        )}
+                      >
+                        {pending
+                          ? "Enriching…"
+                          : needsEnrichment
+                          ? "Enrich"
+                          : "Re-enrich"}
+                      </button>
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
 
@@ -285,34 +306,6 @@ function ContactIcons({
   );
 }
 
-function SmallButton({
-  children,
-  onClick,
-  disabled,
-  tone,
-}: {
-  children: React.ReactNode;
-  onClick: () => void;
-  disabled?: boolean;
-  tone?: "primary";
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      disabled={disabled}
-      className={cn(
-        "rounded-md border px-2 py-1 text-xs font-medium transition-colors disabled:opacity-50",
-        tone === "primary"
-          ? "border-primary bg-primary text-primary-foreground hover:opacity-95"
-          : "border-border hover:bg-muted"
-      )}
-    >
-      {children}
-    </button>
-  );
-}
-
 function Pagination({
   total,
   offset,
@@ -367,9 +360,7 @@ function SkeletonTable() {
 function EmptyState() {
   return (
     <div className="rounded-md border border-dashed border-border bg-muted/20 p-10 text-center text-sm text-muted-foreground">
-      No properties matching current filters.
-      <br />
-      Try adjusting the status filter or loosening the score range.
+      No leads yet. Run a search to surface properties here.
     </div>
   );
 }

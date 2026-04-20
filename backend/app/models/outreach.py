@@ -48,7 +48,6 @@ class OutreachQueue(Base):
             "priority >= 1 AND priority <= 100", name="ck_outreach_priority_range"
         ),
         UniqueConstraint("property_id", name="uq_outreach_property"),
-        Index("idx_outreach_assigned_status", "assigned_to", "status"),
         Index(
             "idx_outreach_priority",
             "priority",
@@ -70,11 +69,6 @@ class OutreachQueue(Base):
         UUID(as_uuid=True),
         ForeignKey("properties.id", ondelete="CASCADE"),
         nullable=False,
-    )
-    assigned_to: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True),
-        ForeignKey("users.id", ondelete="SET NULL"),
-        nullable=True,
     )
 
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending")

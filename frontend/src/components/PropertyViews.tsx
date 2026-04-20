@@ -131,17 +131,33 @@ export function Features({ features }: { features: Record<string, unknown> }) {
   );
 }
 
+const _SOURCE_LABELS: Record<string, string> = {
+  airbnb: "Airbnb",
+  magicbricks: "MagicBricks",
+  "99acres": "99acres",
+};
+
 export function SourceLinks({
   website,
   placeId,
   lat,
   lng,
+  externalUrl,
 }: {
   website: string | null;
   placeId: string | null;
   lat: number | null;
   lng: number | null;
+  externalUrl?: string | null;
 }) {
+  // `google_place_id` is overloaded: for Airbnb / MagicBricks / 99acres rows
+  // it's actually `<source>:<listing_id>`. Detect the prefix so we render a
+  // source-appropriate link instead of pointing an Airbnb listing at Google
+  // Maps.
+  const prefix = (placeId ?? "").split(":", 1)[0];
+  const externalLabel = _SOURCE_LABELS[prefix];
+  const isExternalSource = Boolean(externalLabel);
+
   return (
     <div className="rounded-md border border-border bg-background p-5 text-sm">
       <h3 className="mb-2 text-xs font-medium uppercase text-muted-foreground">
@@ -161,7 +177,20 @@ export function SourceLinks({
             </a>
           </li>
         ) : null}
-        {placeId ? (
+        {isExternalSource && externalUrl ? (
+          <li>
+            🔗{" "}
+            <a
+              href={externalUrl}
+              target="_blank"
+              rel="noreferrer"
+              className="text-primary hover:underline"
+            >
+              View on {externalLabel}
+            </a>
+          </li>
+        ) : null}
+        {!isExternalSource && placeId ? (
           <li>
             🗺️{" "}
             <a

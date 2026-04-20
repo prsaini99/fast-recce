@@ -27,6 +27,19 @@ class SearchRequest(BaseModel):
 
     max_results: int = Field(default=10, ge=1, le=30)
 
+    # Per-request scraper overrides. None = use the env default, True/False
+    # force the source on or off regardless of env. Gives the UI a way to
+    # flip individual sources on a per-search basis without an env change.
+    use_airbnb: bool | None = None
+    use_magicbricks: bool | None = None
+    use_acres99: bool | None = None
+
+    # When true, skip the cache lookup and run the scrape pipeline again.
+    # New property IDs get unioned into the existing search_history row so
+    # the UI sees a growing result set rather than a replacement. Used by
+    # the "Find more results" button.
+    refresh: bool = False
+
 
 class SearchSubScore(BaseModel):
     name: str
@@ -66,6 +79,13 @@ class SearchResultItem(BaseModel):
     primary_image_url: str | None = None
     external_url: str | None = None
     source_label: str | None = None
+
+    # When this property was first discovered by a *different* query than the
+    # one the user just ran, we echo that earlier query back so the frontend
+    # can render a "first seen in <query>" link. Null when the property is
+    # new to this search.
+    source_query_id: UUID | None = None
+    source_query_text: str | None = None
 
 
 class SearchResponse(BaseModel):

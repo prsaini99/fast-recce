@@ -1,4 +1,4 @@
-"""OutreachService — list, update, stats for the outreach queue (M9)."""
+"""OutreachService — list, update, stats for the outreach queue."""
 
 from __future__ import annotations
 
@@ -20,7 +20,6 @@ _TRANSITIONS: dict[str, set[str]] = {
     "responded": {"follow_up", "converted", "declined"},
     "follow_up": {"contacted", "converted", "declined", "no_response"},
     "no_response": {"contacted", "follow_up", "declined"},
-    # Terminal states — no outgoing transitions.
     "converted": set(),
     "declined": set(),
 }
@@ -40,7 +39,6 @@ class OutreachService:
         self,
         *,
         statuses: list[str] | None = None,
-        assigned_to: UUID | None = None,
         city: str | None = None,
         min_priority: int | None = None,
         sort: str = "priority_desc",
@@ -54,12 +52,9 @@ class OutreachService:
 
         if statuses:
             filters.append(OutreachQueue.status.in_(statuses))
-        if assigned_to is not None:
-            filters.append(OutreachQueue.assigned_to == assigned_to)
         if min_priority is not None:
             filters.append(OutreachQueue.priority >= min_priority)
         if city is not None:
-            # Join properties to filter by city.
             filters.append(
                 OutreachQueue.property_id.in_(
                     select(Property.id).where(Property.city == city)
@@ -102,8 +97,6 @@ class OutreachService:
             item.priority = data.priority
         if data.outreach_channel is not None:
             item.outreach_channel = data.outreach_channel
-        if data.assigned_to is not None:
-            item.assigned_to = data.assigned_to
         if data.follow_up_at is not None:
             item.follow_up_at = data.follow_up_at
         if data.notes is not None:
@@ -115,14 +108,6 @@ class OutreachService:
 
     async def stats(self, city: str | None = None) -> OutreachStats:
         from app.models.property import Property
-
-        base = select(OutreachQueue)
-        if city is not None:
-            base = base.where(
-                OutreachQueue.property_id.in_(
-                    select(Property.id).where(Property.city == city)
-                )
-            )
 
         status_stmt = select(
             OutreachQueue.status, func.count(OutreachQueue.id)
@@ -164,7 +149,6 @@ class OutreachService:
     # --- Internals ---
 
     async def _assert_not_dnc(self, property_id: UUID) -> None:
-        """Block 'contacted' transitions if any of the property's contacts are on DNC."""
         contact_stmt = select(PropertyContact).where(
             PropertyContact.property_id == property_id
         )

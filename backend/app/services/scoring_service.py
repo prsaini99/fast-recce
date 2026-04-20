@@ -100,6 +100,24 @@ class ScoringService:
         contacts = await self.contact_service.get_contacts_for_property(property_id)
         features = prop.features_json or {}
 
+        # Pull rich context we've already stashed in features_json so the
+        # LLM reasons from editorial summaries + review snippets + the
+        # source listing URL rather than just name + type.
+        google_ctx = features.get("google_context") or {}
+        editorial = (
+            google_ctx.get("editorial_summary") if isinstance(google_ctx, dict) else None
+        )
+        review_snippets = (
+            list(google_ctx.get("review_snippets") or [])
+            if isinstance(google_ctx, dict)
+            else None
+        )
+        source_url = (
+            features.get("external_url")
+            or features.get("airbnb_url")
+            or prop.canonical_website
+        )
+
         type_fit = SubScore(
             name="type_fit",
             value=_TYPE_FIT.get(prop.property_type, 0.30),
@@ -113,6 +131,9 @@ class ScoringService:
             description=features.get("description"),
             amenities=list(features.get("amenities") or []),
             feature_tags=list(features.get("feature_tags") or []),
+            source_url=source_url if isinstance(source_url, str) else None,
+            editorial_summary=editorial if isinstance(editorial, str) else None,
+            review_snippets=review_snippets,
         )
         shoot_fit = SubScore(
             name="shoot_fit",
@@ -127,6 +148,9 @@ class ScoringService:
             description=features.get("description"),
             amenities=list(features.get("amenities") or []),
             feature_tags=list(features.get("feature_tags") or []),
+            source_url=source_url if isinstance(source_url, str) else None,
+            editorial_summary=editorial if isinstance(editorial, str) else None,
+            review_snippets=review_snippets,
         )
         visual = SubScore(
             name="visual_uniqueness",

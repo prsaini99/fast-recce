@@ -33,12 +33,6 @@ class Settings(BaseSettings):
     database_pool_size: int = 10
     database_max_overflow: int = 20
 
-    # --- Auth ---
-    jwt_secret_key: str
-    jwt_algorithm: str = "HS256"
-    access_token_expire_minutes: int = 15
-    refresh_token_expire_days: int = 7
-
     # --- External APIs ---
     google_places_api_key: str
     gemini_api_key: str

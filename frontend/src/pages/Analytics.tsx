@@ -42,7 +42,7 @@ export function AnalyticsPage() {
           <section className="grid grid-cols-2 gap-4 md:grid-cols-4">
             <StatCard label="Total properties" value={data.properties.total} />
             <StatCard
-              label="New (awaiting review)"
+              label="New"
               value={data.properties.by_status.new ?? 0}
             />
             <StatCard
@@ -50,8 +50,8 @@ export function AnalyticsPage() {
               value={data.properties.by_status.approved ?? 0}
             />
             <StatCard
-              label="Outreach pending"
-              value={data.outreach.pending}
+              label="LLM briefs"
+              value={data.llm.briefed}
             />
           </section>
 
@@ -65,15 +65,6 @@ export function AnalyticsPage() {
           </section>
 
           <section className="grid gap-6 md:grid-cols-2">
-            <Card title="Outreach funnel">
-              <FunnelBars
-                data={{
-                  Pending: data.outreach.pending,
-                  "In progress": data.outreach.in_progress,
-                  Converted: data.outreach.converted,
-                }}
-              />
-            </Card>
             <Card title="LLM coverage">
               <StatRow label="Properties scored" value={data.llm.scored} />
               <StatRow label="Properties briefed" value={data.llm.briefed} />
@@ -153,24 +144,3 @@ function ChartBars({ data }: { data: Record<string, number> }) {
   );
 }
 
-function FunnelBars({ data }: { data: Record<string, number> }) {
-  const max = Math.max(...Object.values(data), 1);
-  return (
-    <ul className="space-y-3">
-      {Object.entries(data).map(([label, value]) => (
-        <li key={label}>
-          <div className="mb-1 flex justify-between text-sm">
-            <span>{label}</span>
-            <span className="tabular-nums text-muted-foreground">{value}</span>
-          </div>
-          <div className="h-2 overflow-hidden rounded bg-muted">
-            <div
-              className="h-full rounded bg-primary"
-              style={{ width: `${(value / max) * 100}%` }}
-            />
-          </div>
-        </li>
-      ))}
-    </ul>
-  );
-}

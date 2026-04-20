@@ -23,10 +23,6 @@ dependencies = [
     "pydantic-settings>=2.7.0",
     "email-validator>=2.2.0",
 
-    # Auth
-    "passlib[bcrypt]>=1.7.4",
-    "python-jose[cryptography]>=3.3.0",
-
     # HTTP & scraping
     "httpx>=0.28.0",
     "beautifulsoup4>=4.12.3",
@@ -59,8 +55,6 @@ dev = [
     "pytest-cov>=6.0.0",
     "httpx>=0.28.0",
     "aiosqlite>=0.20.0",
-    "types-python-jose>=3.3.0",
-    "types-passlib>=1.7.0",
 ]
 
 [build-system]
@@ -107,8 +101,6 @@ warn_return_any = true
 
 [[tool.mypy.overrides]]
 module = [
-    "passlib.*",
-    "jose.*",
     "imagehash.*",
     "geoalchemy2.*",
 ]

@@ -15,6 +15,16 @@ from uuid import UUID
 from sqlalchemy import Select, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+
+def uuid_nil() -> UUID:
+    """Placeholder UUID that is guaranteed not to match any real row.
+
+    Lets us shove a filter of `Property.id == uuid_nil()` into the query
+    when the caller passed `only_ids=[]`, producing a valid SQL statement
+    with zero matches rather than blowing up on an empty IN clause.
+    """
+    return UUID("00000000-0000-0000-0000-000000000000")
+
 logger = logging.getLogger(__name__)
 
 from app.exceptions import ConflictError, NotFoundError, ValidationError
@@ -213,6 +223,7 @@ class PropertyService:
         has_email: bool | None = None,
         include_duplicates: bool = False,
         search: str | None = None,
+        only_ids: list[UUID] | None = None,
         sort: str = "relevance_score_desc",
         offset: int = 0,
         limit: int = 50,
@@ -244,7 +255,15 @@ class PropertyService:
             filters.append(
                 (func.lower(Property.canonical_name).like(pattern))
                 | (func.lower(Property.locality).like(pattern))
+                | (func.lower(Property.city).like(pattern))
             )
+        if only_ids is not None:
+            # Empty list = no rows; SQL IN () would be a syntax error, so
+            # force a guaranteed-empty filter instead.
+            if not only_ids:
+                filters.append(Property.id == uuid_nil())
+            else:
+                filters.append(Property.id.in_(only_ids))
 
         # Count first.
         count_stmt = select(func.count(Property.id))
@@ -279,7 +298,7 @@ class PropertyService:
     # --- Review actions (M9) ---
 
     async def review(
-        self, property_id: UUID, request: ReviewRequest, reviewer_id: UUID | None = None
+        self, property_id: UUID, request: ReviewRequest
     ) -> ReviewResponse:
         """Apply a review action. Enforces status transitions + side effects."""
         prop = await self.get(property_id)
@@ -288,7 +307,7 @@ class PropertyService:
         if action == "approve":
             _assert_transition(prop.status, {"new", "reviewed", "rejected"}, action)
             prop.status = "approved"
-            created = await self._ensure_outreach_entry(prop, reviewer_id)
+            created = await self._ensure_outreach_entry(prop)
             return ReviewResponse(
                 property_id=property_id,
                 status=prop.status,
@@ -314,7 +333,7 @@ class PropertyService:
 
         if action == "do_not_contact":
             prop.status = "do_not_contact"
-            added = await self._blocklist_contacts(property_id, request.notes or "dnc via review", reviewer_id)
+            added = await self._blocklist_contacts(property_id, request.notes or "dnc via review")
             return ReviewResponse(
                 property_id=property_id,
                 status=prop.status,
@@ -343,9 +362,7 @@ class PropertyService:
 
     # --- Internal helpers ---
 
-    async def _ensure_outreach_entry(
-        self, prop: Property, reviewer_id: UUID | None
-    ) -> bool:
+    async def _ensure_outreach_entry(self, prop: Property) -> bool:
         """Create an outreach queue entry for a newly-approved property."""
         existing_stmt = select(OutreachQueue).where(OutreachQueue.property_id == prop.id)
         existing = (await self.db.execute(existing_stmt)).scalar_one_or_none()
@@ -357,14 +374,13 @@ class PropertyService:
             property_id=prop.id,
             status="pending",
             priority=max(1, min(100, priority)),
-            assigned_to=reviewer_id,
         )
         self.db.add(outreach)
         await self.db.flush()
         return True
 
     async def _blocklist_contacts(
-        self, property_id: UUID, reason: str, added_by: UUID | None
+        self, property_id: UUID, reason: str
     ) -> int:
         """Copy every contact belonging to the property into do_not_contact."""
         stmt = select(PropertyContact).where(PropertyContact.property_id == property_id)
@@ -385,7 +401,6 @@ class PropertyService:
                     contact_type=contact.contact_type,
                     contact_value=contact.normalized_value,
                     reason=reason,
-                    added_by=added_by,
                 )
             )
             added += 1

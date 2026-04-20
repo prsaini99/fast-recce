@@ -215,7 +215,6 @@ class ContactService:
     async def add_to_do_not_contact(
         self,
         data: DoNotContactCreate,
-        added_by: UUID | None = None,
     ) -> DoNotContact:
         normalized = _normalize_dnc_value(data.contact_type, data.contact_value)
         existing = await self.db.execute(
@@ -231,7 +230,6 @@ class ContactService:
             contact_type=data.contact_type,
             contact_value=normalized,
             reason=data.reason,
-            added_by=added_by,
         )
         self.db.add(row)
         await self.db.flush()

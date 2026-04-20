@@ -33,6 +33,13 @@ import random
 import re
 import time
 from dataclasses import dataclass
+
+from app.integrations.listing_utils import (
+    format_inr_price as _format_inr_price,
+    to_float as _to_float,
+    to_int as _to_int,
+    to_sqft as _to_sqft,
+)
 from typing import Any
 
 from bs4 import BeautifulSoup
@@ -257,6 +264,56 @@ def _extract_from_ld_json(soup: BeautifulSoup) -> dict[str, Any]:
                 out["locality"] = street.strip()
             if isinstance(locality, str) and locality.strip():
                 out["city_hint"] = locality.strip()
+
+        # Bedrooms / bathrooms / floor area live directly on the listing
+        # block (not a nested `mainEntity` like MagicBricks).
+        bedrooms = _to_int(data.get("numberOfRooms"))
+        if bedrooms is not None:
+            out["bedrooms"] = bedrooms
+        bathrooms = _to_int(
+            data.get("numberOfBathroomsTotal") or data.get("numberOfBathrooms")
+        )
+        if bathrooms is not None:
+            out["bathrooms"] = bathrooms
+        floor_size = data.get("floorSize")
+        if isinstance(floor_size, dict):
+            area_val = _to_float(floor_size.get("value"))
+            unit = (
+                floor_size.get("unitText")
+                or floor_size.get("unitCode")
+                or ""
+            )
+            if area_val is not None:
+                out["area_sqft"] = _to_sqft(area_val, str(unit))
+
+        # Pricing — schema.org `offers.price` + currency. Some listings
+        # already carry a pretty string like "₹1.15 Cr"; fall back to a
+        # formatted numeric for the rest.
+        offers = data.get("offers") or {}
+        if isinstance(offers, dict):
+            currency = offers.get("priceCurrency")
+            price_raw = offers.get("price")
+            price_num = _to_float(price_raw)
+            if price_num is not None:
+                out["price_value"] = price_num
+                out["price_currency"] = (
+                    currency.strip() if isinstance(currency, str) else "INR"
+                )
+                out["price_display"] = _format_inr_price(price_num)
+            elif isinstance(price_raw, str) and price_raw.strip():
+                out["price_display"] = price_raw.strip()
+
+        # Native subtype label (e.g. "Apartment", "SingleFamilyResidence")
+        # from the first matching @type entry — nicer in the UI than our
+        # generic "villa" fallback on the canonical property row.
+        subtype = type_field if isinstance(type_field, str) else None
+        if subtype is None and isinstance(type_list, list):
+            subtype = next(
+                (t for t in type_list if isinstance(t, str) and t in accepted_types),
+                None,
+            )
+        if subtype:
+            out["property_subtype"] = subtype
 
         out["raw_top_keys"] = sorted(data.keys())
         return out  # first matching block wins

@@ -22,7 +22,14 @@ engine = create_async_engine(
     pool_size=settings.database_pool_size,
     max_overflow=settings.database_max_overflow,
     pool_pre_ping=True,
-    connect_args={"statement_cache_size": 0},
+    connect_args={
+        "statement_cache_size": 0,
+        # Supabase's transaction-mode pooler applies a short default
+        # statement_timeout that kills our long search/scrape flow. Bump it
+        # per-session via asyncpg's server_settings (sent in the startup
+        # packet, respected through pgbouncer). Value is in milliseconds.
+        "server_settings": {"statement_timeout": "180000"},
+    },
 )
 
 SessionLocal = async_sessionmaker(

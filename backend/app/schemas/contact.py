@@ -45,7 +45,6 @@ class DoNotContactRead(BaseModel):
     contact_type: DncContactType
     contact_value: str
     reason: str
-    added_by: UUID | None
     created_at: datetime
 
 

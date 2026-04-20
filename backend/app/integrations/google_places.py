@@ -52,6 +52,17 @@ _DETAILS_FIELDS = ",".join(
         "googleMapsUri",
         "regularOpeningHours",
         "businessStatus",
+        # `photos[].name` is the photo reference (format
+        # `places/<id>/photos/<ref>`). We turn the first one into a
+        # `primary_image_url` at ingest time via the Google Places media
+        # endpoint.
+        "photos",
+        # Rich-context fields that we feed into the LLM at enrich time so
+        # Gemini has something substantive to reason about for Google-
+        # Places rows (which don't have a scrape-able canonical page).
+        "editorialSummary",
+        "reviews",
+        "priceLevel",
     ]
 )
 

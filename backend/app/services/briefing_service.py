@@ -59,6 +59,29 @@ class BriefingService:
         features = prop.features_json or {}
         contacts = await self.contact_service.get_contacts_for_property(property_id)
 
+        # Rich-context shortcuts — for Google Places rows we stashed the
+        # editorial summary + review snippets + price level under
+        # features_json.google_context during ingest. For external-source
+        # rows we have an external_url worth passing along so the LLM
+        # knows which listing it's briefing.
+        google_ctx = features.get("google_context") or {}
+        editorial = (
+            google_ctx.get("editorial_summary") if isinstance(google_ctx, dict) else None
+        )
+        review_snippets = (
+            list(google_ctx.get("review_snippets") or [])
+            if isinstance(google_ctx, dict)
+            else None
+        )
+        price_level = (
+            google_ctx.get("price_level") if isinstance(google_ctx, dict) else None
+        )
+        source_url = (
+            features.get("external_url")
+            or features.get("airbnb_url")
+            or prop.canonical_website
+        )
+
         result = await self.llm.generate_brief(
             property_name=prop.canonical_name,
             city=prop.city,
@@ -69,6 +92,20 @@ class BriefingService:
             feature_tags=list(features.get("feature_tags") or []),
             top_score_factors=_top_score_factors(prop.score_reason_json),
             contact_summary=_contact_summary(contacts),
+            source_url=source_url if isinstance(source_url, str) else None,
+            google_rating=prop.google_rating,
+            google_review_count=prop.google_review_count,
+            editorial_summary=editorial if isinstance(editorial, str) else None,
+            review_snippets=review_snippets,
+            price_level=price_level if isinstance(price_level, str) else None,
+            # Scraped listing specifics (optional — only populated for
+            # external-source rows where our parsers succeeded).
+            price_display=features.get("price_display") if isinstance(features.get("price_display"), str) else None,
+            bedrooms=features.get("bedrooms") if isinstance(features.get("bedrooms"), int) else None,
+            bathrooms=features.get("bathrooms") if isinstance(features.get("bathrooms"), int) else None,
+            area_sqft=features.get("area_sqft") if isinstance(features.get("area_sqft"), (int, float)) else None,
+            max_guests=features.get("max_guests") if isinstance(features.get("max_guests"), int) else None,
+            property_subtype=features.get("property_subtype") if isinstance(features.get("property_subtype"), str) else None,
         )
 
         prop.short_brief = result.text

@@ -372,7 +372,86 @@ def _extract_fields(data: Any) -> dict[str, Any]:
         if image:
             out["primary_image_url"] = image
 
+    # Listing specifics — keys live inside the Niobe PDP payload. We walk
+    # with a DFS-any-type helper because the page ships dozens of nested
+    # overview/structured sections and the exact cache path shifts often.
+    person_capacity = _search_any_key_any(data, "personCapacity")
+    if isinstance(person_capacity, int) and person_capacity > 0:
+        out["max_guests"] = person_capacity
+    bedrooms = _search_any_key_any(data, "bedroomCount") or _search_any_key_any(
+        data, "bedrooms"
+    )
+    if isinstance(bedrooms, int) and bedrooms >= 0:
+        out["bedrooms"] = bedrooms
+    bathrooms = _search_any_key_any(data, "bathrooms") or _search_any_key_any(
+        data, "baths"
+    )
+    if isinstance(bathrooms, (int, float)) and bathrooms >= 0:
+        out["bathrooms"] = int(bathrooms)
+
+    # Human-readable nightly price. Airbnb renders it as "₹4,200 per night"
+    # under `structuredDisplayPrice.primaryLine.price`; if that section is
+    # missing (off-markets, login-walls), skip silently — the card still
+    # has a "View on Airbnb" CTA so we don't block the user on it.
+    price_display = _extract_airbnb_price(data)
+    if price_display:
+        out["price_display"] = price_display
+        out["price_currency"] = "INR" if "₹" in price_display else None
+        out["price_period"] = "night"
+
+    room_subtype = _search_any_key_any(data, "roomTypeCategory") or _search_any_key_any(
+        data, "roomType"
+    )
+    if isinstance(room_subtype, str) and room_subtype.strip():
+        out["property_subtype"] = room_subtype.strip()
+
     return out
+
+
+def _search_any_key_any(data: Any, key: str, *, max_depth: int = 8) -> Any:
+    """DFS for the first non-null value under `key`, any type.
+
+    `_search_any_key` (below) is string-only because it was originally built
+    for titles/descriptions. This variant is for numeric fields like
+    `personCapacity` and `bedroomCount` — we just need the first non-null
+    hit regardless of type.
+    """
+    if max_depth <= 0:
+        return None
+    if isinstance(data, dict):
+        if key in data and data[key] is not None:
+            return data[key]
+        for v in data.values():
+            found = _search_any_key_any(v, key, max_depth=max_depth - 1)
+            if found is not None:
+                return found
+    elif isinstance(data, list):
+        for v in data:
+            found = _search_any_key_any(v, key, max_depth=max_depth - 1)
+            if found is not None:
+                return found
+    return None
+
+
+def _extract_airbnb_price(data: Any) -> str | None:
+    """Pull the display price string Airbnb renders on the PDP.
+
+    Two common shapes:
+      - `structuredDisplayPrice.primaryLine.price` → e.g. "₹4,200 per night"
+      - `structuredDisplayPrice.primaryLine.discountedPrice` → when on sale
+    Either one returned as a plain string is good enough for the card.
+    """
+    primary = _search_any_key_any(data, "primaryLine")
+    if isinstance(primary, dict):
+        for key in ("discountedPrice", "price", "originalPrice"):
+            value = primary.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    # Fallback: some layouts stash a flat `priceString`.
+    direct = _search_any_key_any(data, "priceString")
+    if isinstance(direct, str) and direct.strip():
+        return direct.strip()
+    return None
 
 
 def _is_airbnb_error_payload(data: Any) -> bool:

@@ -34,13 +34,30 @@ export function PropertyDetailPage() {
       queryClient.invalidateQueries({ queryKey: ["properties"] });
       queryClient.invalidateQueries({ queryKey: ["analytics"] });
       if (res.action_applied === "approve") {
-        // Bounce to outreach so the reviewer sees their new entry.
-        setTimeout(() => navigate("/admin/outreach"), 800);
+        setTimeout(() => navigate("/outreach"), 800);
       }
     },
     onError: (err) => {
       toast.error(extractErrorMessage(err));
     },
+  });
+
+  // Enrichment (scoring + brief) is now on-demand via Gemini. Each button
+  // lands directly on its own endpoint so users can pay the LLM cost only
+  // for properties they actually care about.
+  const enrichMutation = useMutation({
+    mutationFn: (kind: "score" | "brief" | "enrich") =>
+      kind === "score"
+        ? propertiesApi.score(id!)
+        : kind === "brief"
+        ? propertiesApi.brief(id!)
+        : propertiesApi.enrich(id!),
+    onSuccess: () => {
+      toast.success("Enriched");
+      queryClient.invalidateQueries({ queryKey: ["property", id] });
+      queryClient.invalidateQueries({ queryKey: ["properties"] });
+    },
+    onError: (err) => toast.error(extractErrorMessage(err)),
   });
 
   if (isLoading) {
@@ -73,12 +90,20 @@ export function PropertyDetailPage() {
           </>
         }
         actions={
-          <Link
-            to="/admin/leads"
+          <button
+            type="button"
+            onClick={() => {
+              // `document.referrer` is only populated on the very first
+              // page load, not on SPA route changes, so we gated the
+              // back-navigation on `window.history.length` instead —
+              // that's >1 whenever `navigate(-1)` can actually go back.
+              if (window.history.length > 1) navigate(-1);
+              else navigate("/leads");
+            }}
             className="rounded-md border border-border px-3 py-1.5 text-sm hover:bg-muted"
           >
-            ← Back to queue
-          </Link>
+            ← Back
+          </button>
         }
       />
 
@@ -94,11 +119,43 @@ export function PropertyDetailPage() {
                 </span>
               ) : null}
             </div>
-            <h3 className="mb-2 text-sm font-medium text-muted-foreground">
-              AI Brief
-            </h3>
+            <div className="mb-2 flex items-center justify-between">
+              <h3 className="text-sm font-medium text-muted-foreground">
+                AI Brief
+              </h3>
+              <div className="flex gap-2 text-xs">
+                <button
+                  type="button"
+                  onClick={() => enrichMutation.mutate("score")}
+                  disabled={enrichMutation.isPending}
+                  className="rounded-md border border-border px-2 py-1 hover:bg-muted disabled:opacity-50"
+                >
+                  {data.relevance_score == null ? "Score" : "Re-score"}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => enrichMutation.mutate("brief")}
+                  disabled={enrichMutation.isPending}
+                  className="rounded-md border border-border px-2 py-1 hover:bg-muted disabled:opacity-50"
+                >
+                  {data.short_brief ? "Re-brief" : "Generate brief"}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => enrichMutation.mutate("enrich")}
+                  disabled={enrichMutation.isPending}
+                  className="rounded-md border border-primary/50 bg-primary/10 px-2 py-1 font-medium hover:bg-primary/15 disabled:opacity-50"
+                >
+                  {enrichMutation.isPending ? "Running…" : "Score + brief"}
+                </button>
+              </div>
+            </div>
             <p className="leading-relaxed">
-              {data.short_brief ?? <em className="text-muted-foreground">No brief generated yet.</em>}
+              {data.short_brief ?? (
+                <em className="text-muted-foreground">
+                  No brief yet — click "Generate brief" to run the LLM.
+                </em>
+              )}
             </p>
           </div>
 
@@ -342,7 +399,7 @@ function OutreachSummary({
         <p className="mt-2 text-xs">{outreach.notes}</p>
       ) : null}
       <Link
-        to="/admin/outreach"
+        to="/outreach"
         className="mt-3 block text-xs text-primary hover:underline"
       >
         Manage in outreach pipeline →

@@ -271,7 +271,8 @@ def _extract_from_ld_json(soup: BeautifulSoup) -> dict[str, Any]:
         elif isinstance(image, str):
             out["primary_image_url"] = image
 
-        # Location / amenities live on the nested `mainEntity` (@type House/Apartment).
+        # Location / amenities / dimensions / price live on the nested
+        # `mainEntity` (@type House/Apartment/ResidentialBuilding).
         main = data.get("mainEntity") or {}
         if isinstance(main, dict):
             address = main.get("address") or {}
@@ -292,10 +293,60 @@ def _extract_from_ld_json(soup: BeautifulSoup) -> dict[str, Any]:
                             names.append(n.strip())
                 if names:
                     out["amenities"] = names[:50]
+            # Bedrooms / bathrooms come back as strings occasionally (JSON-
+            # LD authors aren't consistent), so coerce with tolerance.
+            bedrooms = _to_int(main.get("numberOfRooms"))
+            if bedrooms is not None:
+                out["bedrooms"] = bedrooms
+            bathrooms = _to_int(
+                main.get("numberOfBathroomsTotal")
+                or main.get("numberOfBathrooms")
+            )
+            if bathrooms is not None:
+                out["bathrooms"] = bathrooms
+            floor_size = main.get("floorSize")
+            if isinstance(floor_size, dict):
+                area_val = _to_float(floor_size.get("value"))
+                unit = (floor_size.get("unitText") or floor_size.get("unitCode") or "").lower()
+                if area_val is not None:
+                    out["area_sqft"] = _to_sqft(area_val, unit)
+            subtype = main.get("@type") or main.get("type")
+            if isinstance(subtype, list):
+                subtype = subtype[0] if subtype else None
+            if isinstance(subtype, str) and subtype.strip():
+                out["property_subtype"] = subtype.strip()
+
+        # Pricing. MagicBricks serves it under `offers` / `price` with a
+        # `priceCurrency` (usually INR). Value may already be human-readable
+        # ("₹1.15 Cr") in some blobs; fall back to a formatted numeric.
+        offers = data.get("offers") or {}
+        if isinstance(offers, dict):
+            currency = offers.get("priceCurrency")
+            price_raw = offers.get("price")
+            price_num = _to_float(price_raw)
+            if price_num is not None:
+                out["price_value"] = price_num
+                out["price_currency"] = (
+                    currency.strip() if isinstance(currency, str) else "INR"
+                )
+                out["price_display"] = _format_inr_price(price_num)
+            elif isinstance(price_raw, str) and price_raw.strip():
+                out["price_display"] = price_raw.strip()
 
         out["raw_top_keys"] = sorted(data.keys())
         return out  # first RealEstateListing wins
     return out
+
+
+# Shared parsing helpers were moved to listing_utils.py so 99acres can
+# reuse them without cross-scraper imports. Keep these thin aliases so
+# the rest of this file continues to call `_to_int(...)` etc.
+from app.integrations.listing_utils import (
+    format_inr_price as _format_inr_price,
+    to_float as _to_float,
+    to_int as _to_int,
+    to_sqft as _to_sqft,
+)
 
 
 def _extract_from_html_fallback(soup: BeautifulSoup) -> dict[str, Any]:

@@ -125,9 +125,6 @@ class DoNotContact(Base):
     contact_value: Mapped[str] = mapped_column(String(500), nullable=False)
     reason: Mapped[str] = mapped_column(Text, nullable=False)
 
-    # Will become FK to users.id once M9 adds the users table — nullable for now.
-    added_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
-
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )

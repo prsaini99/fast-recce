@@ -156,9 +156,14 @@ class SearchService:
         # We treat any past run as a cache hit (no TTL for now) — identical
         # text queries reuse the same scraped property set. The user can
         # always trigger a fresh scrape by tweaking their query text.
+        #
+        # Refresh mode ("Find more results") bypasses this path entirely so
+        # we actually re-invoke the pipeline. We still read `cached` below
+        # because we need its `result_property_ids` set to filter scraped
+        # hits down to genuinely new ones.
         normalized = normalize_query(request.query)
         cached = await self.history_service.get_by_normalized(normalized)
-        if cached is not None and cached.result_property_ids:
+        if not request.refresh and cached is not None and cached.result_property_ids:
             cached_ids = [uuid.UUID(pid) for pid in cached.result_property_ids]
             cached_rows = await self.property_service.list_by_ids(cached_ids)
             if cached_rows:
@@ -331,14 +336,35 @@ class SearchService:
             if location_hint else []
         )
 
+        # Refresh mode: "Find more results" wants N unique-new properties
+        # that AREN'T already in this query's history row. So we hide the
+        # pre-existing set from `merged` before it's built. Cap with
+        # `additional_results` (if provided) rather than `max_results` so
+        # the popover's count is what the user gets.
+        existing_query_ids: set[Any] = set()
+        if request.refresh and cached is not None and cached.result_property_ids:
+            for raw in cached.result_property_ids:
+                try:
+                    existing_query_ids.add(uuid.UUID(str(raw)))
+                except (ValueError, TypeError):
+                    continue
+        cap = (
+            request.additional_results
+            if request.refresh and request.additional_results is not None
+            else request.max_results
+        )
+
         seen_ids: set[Any] = set()
         merged: list[Any] = []
         for row in (*fresh_items, *hint_items):
             if row.id in seen_ids:
                 continue
+            if row.id in existing_query_ids:
+                # Already in this query's history; refresh wants only new.
+                continue
             seen_ids.add(row.id)
             merged.append(row)
-            if len(merged) >= request.max_results:
+            if len(merged) >= cap:
                 break
 
         # Annotate each result with its originating query when the property
@@ -402,33 +428,68 @@ class SearchService:
         city_hint: str | None,
         property_type_hint: str | None,
     ) -> dict[str, Any]:
-        """Google Places → crawl → ingest (existing behaviour)."""
+        """Google Places → crawl → ingest.
+
+        Normal mode runs one discovery against `request.query`. Refresh
+        mode ("Find more results") runs that plus a couple of phrasing
+        variants back-to-back so we pull in Google results that the
+        original phrasing missed. Google Text Search caps at ~60 per
+        unique query string, so varying the phrasing is the only way to
+        keep surfacing new place_ids once the original set is exhausted.
+        """
         errors: list[str] = []
         ingested_ids: list[Any] = []
-        try:
-            discovery = await self.discovery_service.discover_ad_hoc(
-                query_text=request.query,
-                city=city_hint,
-                property_type=property_type_hint,
-            )
-        except Exception as exc:  # noqa: BLE001
-            return _zero_path_outcome([f"Google Places discovery failed: {exc}"])
+        total_discovered = 0
+        total_created = 0
+        total_skipped_known = 0
+        total_filtered_non_shoot = 0
 
-        errors.extend(discovery.errors)
+        queries = (
+            _query_variants_for_refresh(request.query)
+            if request.refresh
+            else [request.query]
+        )
+        seen_place_ids: set[str] = set()
 
-        for candidate in discovery.new_candidates:
+        for q in queries:
             try:
-                prop_id = await self._ingest_candidate(candidate)
-                if prop_id is not None:
-                    ingested_ids.append(prop_id)
-            except Exception as exc:  # noqa: BLE001 — per-item isolation
-                errors.append(f"ingest failed for '{candidate.name}': {exc}")
+                discovery = await self.discovery_service.discover_ad_hoc(
+                    query_text=q,
+                    city=city_hint,
+                    property_type=property_type_hint,
+                )
+            except Exception as exc:  # noqa: BLE001
+                errors.append(
+                    f"Google Places discovery failed for {q!r}: {exc}"
+                )
+                continue
+
+            errors.extend(discovery.errors)
+            total_discovered += discovery.google_results_total
+            total_created += discovery.candidates_created
+            total_skipped_known += discovery.candidates_skipped_known
+            total_filtered_non_shoot += discovery.candidates_filtered_non_shoot
+
+            for candidate in discovery.new_candidates:
+                # Across variants we often re-see the same place_id; ingest
+                # it once per refresh call.
+                if candidate.external_id in seen_place_ids:
+                    continue
+                seen_place_ids.add(candidate.external_id)
+                try:
+                    prop_id = await self._ingest_candidate(candidate)
+                    if prop_id is not None:
+                        ingested_ids.append(prop_id)
+                except Exception as exc:  # noqa: BLE001 — per-item isolation
+                    errors.append(
+                        f"ingest failed for '{candidate.name}': {exc}"
+                    )
 
         return {
-            "candidates_discovered": discovery.google_results_total,
-            "candidates_new": discovery.candidates_created,
-            "candidates_skipped_known": discovery.candidates_skipped_known,
-            "candidates_filtered_non_shoot": discovery.candidates_filtered_non_shoot,
+            "candidates_discovered": total_discovered,
+            "candidates_new": total_created,
+            "candidates_skipped_known": total_skipped_known,
+            "candidates_filtered_non_shoot": total_filtered_non_shoot,
             "source_id": None,
             "listings_scraped": 0,
             "errors": errors,
@@ -502,9 +563,22 @@ class SearchService:
                     )
                     break
 
-        # Step 2: persist each scraped listing.
+        # Step 2: filter obvious off-topic listings before persisting. DDG
+        # occasionally surfaces results that have nothing to do with the
+        # typed location — e.g. `site:airbnb.com/rooms property in jaipur`
+        # has returned villas in Kosgoda (Sri Lanka). Persisting those
+        # stamps the user's hint as `locality`, so every future search
+        # for "jaipur" re-surfaces the Sri Lanka property. Cheap guard:
+        # accept a listing only if the scraper-reported city/title/
+        # description actually mentions the hint.
         ingested_ids: list[Any] = []
         for listing in listings:
+            if not _listing_matches_location_hint(listing, location_hint):
+                errors.append(
+                    f"{label} listing skipped (location mismatch: hint={location_hint!r} "
+                    f"vs city={listing.city_hint!r}): {listing.url}"
+                )
+                continue
             try:
                 prop_id = await self._ingest_external_listing(listing, location_hint)
                 if prop_id is not None:
@@ -543,13 +617,23 @@ class SearchService:
         a proper `external_source` / `external_id` split is planned.
         """
         # Sources tag listings with the parent city ("Mumbai") and rarely
-        # the neighborhood. If the user typed a more specific hint
-        # ("kandivali") and the scraper didn't already give us a
-        # neighborhood/locality, preserve the user's intent in `locality`
-        # so future searches for that hint can find this row.
+        # the neighborhood. We used to backfill `locality` with the
+        # user-typed hint when the scraper didn't supply one — but that
+        # caused off-topic DDG hits (Sri-Lanka villa surfaced for "jaipur")
+        # to be permanently tagged with the wrong locality.
+        #
+        # Now: accept the user's hint as locality ONLY when the scraped
+        # title/description/city ALREADY contains the hint somewhere.
+        # That keeps the original "preserve user's neighborhood intent"
+        # benefit for e.g. a Mumbai villa where the listing title says
+        # "Apartment in Kandivali", while rejecting nonsense matches.
         source_city = (listing.city_hint or "").strip()
         derived_locality = listing.locality or listing.neighborhood
-        if not derived_locality and location_hint:
+        if (
+            not derived_locality
+            and location_hint
+            and _listing_matches_location_hint(listing, location_hint, require_text=True)
+        ):
             hint = location_hint.strip()
             if hint and hint.lower() != source_city.lower():
                 derived_locality = hint.title()
@@ -816,6 +900,99 @@ def _infer_city(query: str) -> str | None:
         if re.search(rf"(?<![a-z]){re.escape(city.lower())}(?![a-z])", normalized):
             return city
     return None
+
+
+def _listing_matches_location_hint(
+    listing: "ExternalListing",
+    location_hint: str,
+    *,
+    require_text: bool = False,
+) -> bool:
+    """Best-effort check that a scraped listing is actually at the user's location.
+
+    DDG's site-restricted search occasionally surfaces unrelated listings
+    (a Sri Lanka villa for "property in jaipur"). We reject anything
+    where none of the scraped text — city / locality / neighborhood /
+    title / description — mentions the user's hint.
+
+    - Empty `location_hint` → assume match (caller handled intent elsewhere).
+    - Scraper returned a `city` that loosely matches the hint → match.
+    - `require_text=True` raises the bar: only trust a hit that comes
+      from the scraped title/description (not just the city/locality
+      fields), used for the stricter "should we stamp user hint as
+      locality?" decision.
+    """
+    hint = (location_hint or "").strip().lower()
+    if not hint or len(hint) < 3:
+        return True  # nothing to filter against
+
+    # Normalize the hint to its significant tokens (drop stop-words).
+    # "kandivali west" → {"kandivali", "west"}. Any one substring hit is
+    # enough; we'd rather over-admit than drop real matches.
+    tokens = [t for t in re.split(r"[^a-z0-9]+", hint) if len(t) >= 3]
+    if not tokens:
+        return True
+
+    city_blob = " ".join(
+        str(getattr(listing, k, "") or "")
+        for k in ("city_hint", "locality", "neighborhood")
+    ).lower()
+    text_blob = " ".join(
+        str(getattr(listing, k, "") or "")
+        for k in ("title", "description")
+    ).lower()
+
+    def any_hit(blob: str) -> bool:
+        return any(tok in blob for tok in tokens)
+
+    if require_text:
+        return any_hit(text_blob)
+    return any_hit(city_blob) or any_hit(text_blob)
+
+
+def _query_variants_for_refresh(query: str, limit: int = 3) -> list[str]:
+    """Build phrasing alternates for the same semantic search.
+
+    Google's Text Search caps at ~60 results per unique query string, so
+    after the first run we exhaust that set and subsequent scrapes find
+    nothing new. Varying the phrasing ("cafe in manali" → "best cafes
+    manali" → "coffee shops manali") pulls overlapping-but-distinct
+    result sets out of Google's index so the "Find more" button can
+    actually surface more properties.
+
+    Keeps the original query first so the pipeline still re-checks the
+    canonical phrasing (useful when Google's rankings shift over time).
+    Dedupes case-insensitively and caps at `limit`.
+    """
+    q = query.strip()
+    if not q:
+        return [q]
+
+    variants: list[str] = [q]
+
+    # Split on the preposition to grab `<thing>` + `<place>` separately.
+    # "resorts in Alibaug" → thing="resorts", place="Alibaug"
+    parts = re.split(r"\s+(?:in|near|at|around)\s+", q, maxsplit=1)
+    if len(parts) == 2:
+        thing, place = parts[0].strip(), parts[1].strip()
+        if thing and place:
+            variants.append(f"best {thing} {place}")
+            variants.append(f"top {thing} near {place}")
+            variants.append(f"popular {thing} {place}")
+    else:
+        variants.extend([f"best {q}", f"top {q}", f"popular {q}"])
+
+    seen: set[str] = set()
+    out: list[str] = []
+    for v in variants:
+        key = v.lower().strip()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(v)
+        if len(out) >= limit:
+            break
+    return out
 
 
 def _google_rich_context_from_candidate(

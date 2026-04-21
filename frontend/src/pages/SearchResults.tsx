@@ -8,7 +8,7 @@ import { extractErrorMessage } from "@/api/client";
 import { propertiesApi, searchApi } from "@/api/endpoints";
 import type { SearchJob, SearchResultItem } from "@/api/types";
 import { ScoreBadge } from "@/components/ScoreBadge";
-import { loadSearchPrefs } from "@/components/SearchOptions";
+import { loadSearchPrefs, ScraperToggle } from "@/components/SearchOptions";
 
 const PROGRESS_STAGES = [
   "Searching Google Places…",
@@ -69,16 +69,40 @@ export function SearchResultsPage() {
   // Kick off the job exactly once per (query, missing pinned job).
   // React-Query's `useMutation` gives us onSuccess + idempotent re-mount
   // behavior when combined with the sessionStorage guard above.
+  // Capture the previous result count so we can toast a delta after a
+  // refresh finishes. Remembered per query so switching between searches
+  // doesn't confuse the diff.
+  const previousCountRef = useRef<number>(0);
+  const pendingRefreshDeltaRef = useRef<{ before: number } | null>(null);
+
   const startMutation = useMutation({
-    mutationFn: (opts?: { refresh?: boolean }) => {
+    mutationFn: (opts?: {
+      refresh?: boolean;
+      additional?: number;
+      useAirbnb?: boolean | null;
+      useMagicbricks?: boolean | null;
+      useAcres99?: boolean | null;
+    }) => {
       const prefs = loadSearchPrefs();
+      // Refresh popover can override the scraper prefs for a single run
+      // without mutating the persisted localStorage value. If the caller
+      // passes `undefined` for an override we fall back to the saved pref.
+      const useAirbnb =
+        opts?.useAirbnb !== undefined ? opts.useAirbnb : prefs.use_airbnb;
+      const useMagicbricks =
+        opts?.useMagicbricks !== undefined
+          ? opts.useMagicbricks
+          : prefs.use_magicbricks;
+      const useAcres99 =
+        opts?.useAcres99 !== undefined ? opts.useAcres99 : prefs.use_acres99;
       return searchApi.start({
         query,
         max_results: prefs.max_results,
-        use_airbnb: prefs.use_airbnb,
-        use_magicbricks: prefs.use_magicbricks,
-        use_acres99: prefs.use_acres99,
+        use_airbnb: useAirbnb,
+        use_magicbricks: useMagicbricks,
+        use_acres99: useAcres99,
         refresh: opts?.refresh ?? false,
+        additional_results: opts?.refresh ? (opts.additional ?? 5) : null,
       });
     },
     onSuccess: (job) => {
@@ -109,14 +133,28 @@ export function SearchResultsPage() {
   }, [query, jobId]);
 
   // "Find more results" — user already has results for this query but wants
-  // us to scrape again and union any new property IDs into the same
-  // search_history row. We skip the cache by passing refresh=true and
-  // adopt the new job id so the poll switches to the freshly-running job.
-  function runRefresh() {
-    firedForQueryRef.current = query; // prevent the auto-mount effect from re-firing
+  // N more unique rows. We skip the cache by passing refresh=true, tell
+  // the backend how many new uniques to return, and adopt the new job id
+  // so the poll switches to the freshly-running job. `pendingRefreshDelta`
+  // remembers the pre-refresh count so we can toast the delta once the
+  // job completes and the results list updates.
+  function runRefresh(opts: {
+    additional: number;
+    useAirbnb: boolean | null;
+    useMagicbricks: boolean | null;
+    useAcres99: boolean | null;
+  }) {
+    pendingRefreshDeltaRef.current = { before: previousCountRef.current };
+    firedForQueryRef.current = query;
     clearPinnedJobId(query);
     setJobId(null);
-    startMutation.mutate({ refresh: true });
+    startMutation.mutate({
+      refresh: true,
+      additional: opts.additional,
+      useAirbnb: opts.useAirbnb,
+      useMagicbricks: opts.useMagicbricks,
+      useAcres99: opts.useAcres99,
+    });
   }
 
   // Poll the job. Stops polling once it reaches a terminal state.
@@ -154,6 +192,30 @@ export function SearchResultsPage() {
     setJobId(null);
   }, [jobStatus, query]);
 
+  // Whenever we render a completed job with a response, snapshot its
+  // result count. The next refresh reads this from `previousCountRef`
+  // to compute how many new properties got added.
+  const currentResultCount = jobQuery.data?.response?.results.length ?? 0;
+  useEffect(() => {
+    if (jobStatus !== "completed") return;
+    // If a refresh was pending, toast the delta before overwriting the
+    // snapshot. Completed cache-hit jobs (no pending refresh) just
+    // update the snapshot silently.
+    const pending = pendingRefreshDeltaRef.current;
+    if (pending) {
+      const delta = currentResultCount - pending.before;
+      if (delta > 0) {
+        toast.success(
+          `Added ${delta} new result${delta === 1 ? "" : "s"}`,
+        );
+      } else {
+        toast.message("No new results — the scrape surfaced only properties you'd already seen.");
+      }
+      pendingRefreshDeltaRef.current = null;
+    }
+    previousCountRef.current = currentResultCount;
+  }, [jobStatus, currentResultCount]);
+
   const runningSeconds = useRunningSeconds(
     jobQuery.data?.started_at,
     jobStatus === "running",
@@ -172,14 +234,7 @@ export function SearchResultsPage() {
           <h2 className="text-2xl font-semibold">"{query || "—"}"</h2>
         </div>
         {canRefresh && jobQuery.data?.response ? (
-          <button
-            type="button"
-            onClick={runRefresh}
-            title="Re-run the pipeline and add any new properties to this search"
-            className="shrink-0 rounded-md border border-primary/50 bg-primary/10 px-3 py-1.5 text-xs font-medium hover:bg-primary/15"
-          >
-            ↻ Find more results
-          </button>
+          <FindMoreButton onSubmit={runRefresh} />
         ) : null}
       </div>
 
@@ -216,6 +271,144 @@ export function SearchResultsPage() {
     </div>
   );
 }
+
+/**
+ * Popover next to the results header. Opens with a number-of-results
+ * input and the three scraper toggles so the user can, per-refresh,
+ * narrow or broaden sources without touching their saved prefs. Initial
+ * toggle state is seeded from `loadSearchPrefs()` so the popover reflects
+ * the user's sticky preferences — overrides here only affect THIS
+ * refresh call.
+ *
+ * Built inline (no headless-ui / Radix) because this is the only popover
+ * in the tree; adding a dep for one widget would be over-engineering.
+ */
+interface FindMorePayload {
+  additional: number;
+  useAirbnb: boolean | null;
+  useMagicbricks: boolean | null;
+  useAcres99: boolean | null;
+}
+
+function FindMoreButton({
+  onSubmit,
+}: {
+  onSubmit: (payload: FindMorePayload) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [count, setCount] = useState<number>(5);
+  // Seed toggles from saved prefs so "Default/On/Off" starts where the
+  // user left the main Options popover. Reload on every open in case
+  // they changed prefs from the Options panel in between.
+  const [airbnb, setAirbnb] = useState<boolean | null>(null);
+  const [magicbricks, setMagicbricks] = useState<boolean | null>(null);
+  const [acres99, setAcres99] = useState<boolean | null>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const prefs = loadSearchPrefs();
+    setAirbnb(prefs.use_airbnb);
+    setMagicbricks(prefs.use_magicbricks);
+    setAcres99(prefs.use_acres99);
+  }, [open]);
+
+  useEffect(() => {
+    function handler(e: MouseEvent) {
+      if (!containerRef.current?.contains(e.target as Node)) setOpen(false);
+    }
+    if (open) document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [open]);
+
+  function commit() {
+    const clamped = Math.max(1, Math.min(20, Math.round(count)));
+    onSubmit({
+      additional: clamped,
+      useAirbnb: airbnb,
+      useMagicbricks: magicbricks,
+      useAcres99: acres99,
+    });
+    setOpen(false);
+  }
+
+  return (
+    <div ref={containerRef} className="relative shrink-0">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
+        title="Add more unique results to this search"
+        className="rounded-md border border-primary/50 bg-primary/10 px-3 py-1.5 text-xs font-medium hover:bg-primary/15"
+      >
+        ↻ Find more results
+      </button>
+      {open ? (
+        <div
+          role="dialog"
+          className="absolute right-0 top-full z-20 mt-1 w-72 rounded-md border border-border bg-background p-3 text-sm shadow-lg"
+        >
+          <label className="mb-3 block">
+            <span className="mb-1 block text-xs text-muted-foreground">
+              How many more unique results?
+            </span>
+            <input
+              type="number"
+              min={1}
+              max={20}
+              step={1}
+              value={count}
+              onChange={(e) => setCount(Number(e.target.value) || 1)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  commit();
+                }
+              }}
+              autoFocus
+              className="w-full rounded-md border border-border bg-background px-2 py-1 text-sm"
+            />
+          </label>
+
+          <div className="mb-1 text-xs text-muted-foreground">
+            Property scrapers (for this search)
+          </div>
+          <p className="mb-2 text-[11px] text-muted-foreground">
+            "Default" defers to your saved preference.
+          </p>
+          <ScraperToggle label="Airbnb" value={airbnb} onChange={setAirbnb} />
+          <ScraperToggle
+            label="MagicBricks"
+            value={magicbricks}
+            onChange={setMagicbricks}
+          />
+          <ScraperToggle label="99acres" value={acres99} onChange={setAcres99} />
+
+          <p className="mb-3 mt-2 text-[11px] text-muted-foreground">
+            We'll scrape again and skip anything already in your results.
+          </p>
+          <div className="flex justify-end gap-2">
+            <button
+              type="button"
+              onClick={() => setOpen(false)}
+              className="rounded-md border border-border px-2 py-1 text-xs hover:bg-muted"
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              onClick={commit}
+              className="rounded-md bg-primary px-3 py-1 text-xs font-medium text-primary-foreground hover:opacity-95"
+            >
+              Find
+            </button>
+          </div>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 
 function useRunningSeconds(
   startedAtIso: string | undefined,

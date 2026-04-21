@@ -40,6 +40,13 @@ class SearchRequest(BaseModel):
     # the "Find more results" button.
     refresh: bool = False
 
+    # Cap on how many NEW unique properties (not already in this query's
+    # history row) we want this refresh pass to return. Lets the "Find
+    # more results" popover ask the user for N and guarantee up-to-N
+    # actually-new rows rather than a pile of duplicates. Ignored when
+    # refresh=false. None = fall back to `max_results`.
+    additional_results: int | None = Field(default=None, ge=1, le=20)
+
 
 class SearchSubScore(BaseModel):
     name: str

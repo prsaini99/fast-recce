@@ -153,7 +153,7 @@ export function SearchOptionsButton({ prefs, onChange }: Props) {
   );
 }
 
-function ScraperToggle({
+export function ScraperToggle({
   label,
   value,
   onChange,

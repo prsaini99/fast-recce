@@ -216,6 +216,7 @@ export interface SearchRequest {
   use_magicbricks?: boolean | null;
   use_acres99?: boolean | null;
   refresh?: boolean;
+  additional_results?: number | null;
 }
 
 export interface SearchSubScore {
